@@ -8,5 +8,6 @@
   "bit_browser_api": "http://127.0.0.1:54345",
   "bit_browser_id": "",
   "icloud_login_url": "https://www.icloud.com.cn/icloudplus/",
-  "icloud_default_host": "www.icloud.com.cn"
+  "icloud_default_host": "www.icloud.com.cn",
+  "icloud_client_id": "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d"
 }

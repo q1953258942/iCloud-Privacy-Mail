@@ -21,18 +21,20 @@ import (
 var webFS embed.FS
 
 type Server struct {
-	cfg    Config
-	store  *FileStore
-	logger *slog.Logger
-	mux    *http.ServeMux
+	cfg                  Config
+	store                *FileStore
+	logger               *slog.Logger
+	mux                  *http.ServeMux
+	icloudProtocolLogins *appleAuthPendingStore
 }
 
 func NewServer(cfg Config, store *FileStore, logger *slog.Logger) http.Handler {
 	s := &Server{
-		cfg:    cfg,
-		store:  store,
-		logger: logger,
-		mux:    http.NewServeMux(),
+		cfg:                  cfg,
+		store:                store,
+		logger:               logger,
+		mux:                  http.NewServeMux(),
+		icloudProtocolLogins: newAppleAuthPendingStore(),
 	}
 	s.routes()
 	return s
@@ -52,6 +54,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	s.mux.HandleFunc("POST /api/v1/mailboxes/claim", s.handleClaimMailbox)
 	s.mux.HandleFunc("GET /api/icloud/session", s.handleICloudSession)
+	s.mux.HandleFunc("POST /api/icloud/protocol-login/start", s.handleStartICloudProtocolLogin)
+	s.mux.HandleFunc("POST /api/icloud/protocol-login/2fa", s.handleSubmitICloudProtocol2FA)
 	s.mux.HandleFunc("POST /api/icloud/browser/open", s.handleOpenICloudBrowser)
 	s.mux.HandleFunc("POST /api/icloud/session/save", s.handleSaveICloudSession)
 	s.mux.HandleFunc("POST /api/icloud/mailboxes/create", s.handleCreateICloudMailbox)
@@ -156,6 +160,81 @@ func (s *Server) handleICloudSession(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "session": publicSession(&session)})
+}
+
+func (s *Server) handleStartICloudProtocolLogin(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		AppleID  string `json:"apple_id"`
+		Password string `json:"password"`
+	}
+	if err := decodeJSON(r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	result, err := NewAppleAuthClient().StartLogin(
+		r.Context(),
+		payload.AppleID,
+		payload.Password,
+		s.cfg.ICloudDefaultHost,
+		s.cfg.ICloudClientID,
+		s.icloudProtocolLogins,
+	)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	if result.Needs2FA {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"success":    true,
+			"needs_2fa":  true,
+			"pending_id": result.PendingID,
+			"apple_id":   result.AppleID,
+			"expires_at": formatTime(result.ExpiresAt),
+			"message":    result.Message,
+		})
+		return
+	}
+	if err := s.store.SaveICloudSession(result.Session); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":   true,
+		"needs_2fa": false,
+		"message":   result.Message,
+		"session":   publicSession(&result.Session),
+	})
+}
+
+func (s *Server) handleSubmitICloudProtocol2FA(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		PendingID string `json:"pending_id"`
+		Code      string `json:"code"`
+	}
+	if err := decodeJSON(r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	pending, ok := s.icloudProtocolLogins.get(payload.PendingID)
+	if !ok {
+		writeError(w, http.StatusBadRequest, errCode("apple_login_pending_expired", "协议登录已过期，请重新输入账号密码发起登录", true))
+		return
+	}
+	session, err := NewAppleAuthClient().Submit2FA(r.Context(), pending, payload.Code)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	s.icloudProtocolLogins.delete(payload.PendingID)
+	if err := s.store.SaveICloudSession(session); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success": true,
+		"message": "Apple 协议 2FA 登录成功，登录态已保存",
+		"session": publicSession(&session),
+	})
 }
 
 func (s *Server) handleOpenICloudBrowser(w http.ResponseWriter, r *http.Request) {

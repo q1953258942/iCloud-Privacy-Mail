@@ -192,7 +192,7 @@
       <div>
         <div class="eyebrow">Pure Protocol Console</div>
         <h1>iCloud Privacy Mail</h1>
-        <div class="sub">隐私邮箱创建、纯协议同步和 API 工作台。浏览器只用于人工登录保存 Cookie，取码由 Go 后端直接请求 iCloud Mail。</div>
+        <div class="sub">隐私邮箱创建、纯协议同步和 API 工作台。支持 Apple SRP 协议登录；浏览器登录只作为兜底。</div>
       </div>
       <button class="primary" onclick="refresh()">刷新状态</button>
     </div>
@@ -210,15 +210,24 @@
         <section class="panel">
           <div class="panel-head">
             <h2>1. 保存登录态</h2>
-            <p>手动登录一次 iCloud，后续创建邮箱和取码走 Go 纯协议。</p>
+            <p>推荐用 Go 协议登录。密码只提交到本机服务，不写入日志和状态文件。</p>
           </div>
-          <div class="notice" id="icloudSessionInfo">未保存登录态。点击打开登录窗口，手动登录完成后保存登录态。</div>
+          <div class="notice" id="icloudSessionInfo">未保存登录态。输入 Apple ID/密码发起协议登录，收到 2FA 后提交验证码。</div>
+          <div class="field-grid">
+            <label>Apple ID<input id="protocolAppleId" autocomplete="username" placeholder="name@icloud.com"></label>
+            <label>密码<input id="protocolPassword" type="password" autocomplete="current-password" placeholder="Apple ID 密码"></label>
+            <label class="full">2FA 验证码<input id="protocol2FA" inputmode="numeric" maxlength="6" placeholder="收到后输入 6 位验证码"></label>
+          </div>
           <div class="toolbar">
-            <button onclick="openICloudLogin()">打开登录窗口</button>
-            <button class="primary" onclick="saveICloudSession()">保存登录态</button>
+            <button class="primary" onclick="startProtocolLogin()">协议登录</button>
+            <button onclick="submitProtocol2FA()">提交 2FA</button>
           </div>
           <details class="inline-details">
-            <summary>高级连接参数</summary>
+            <summary>浏览器兜底 / 高级连接参数</summary>
+            <div class="toolbar" style="padding-left:0;padding-right:0;">
+              <button onclick="openICloudLogin()">打开登录窗口</button>
+              <button onclick="saveICloudSession()">保存登录态</button>
+            </div>
             <div class="field-grid">
               <label>比特浏览器 ID<input id="browserId" placeholder="可留空，自动新建窗口"></label>
               <label>CDP HTTP<input id="cdpHttp" placeholder="自动填入，如 127.0.0.1:55240"></label>
@@ -322,6 +331,7 @@
     const $ = (id) => document.getElementById(id);
     const adminKeyStorage = 'ipm_admin_key';
     let lastMailboxes = [];
+    let protocolPendingID = '';
 
     async function api(path, options = {}) {
       const headers = {'content-type': 'application/json', ...(options.headers || {})};
@@ -472,6 +482,40 @@
       })});
       renderICloudSession(data.session);
       log('iCloud 登录态已保存：' + (data.session.apple_id || '-'));
+      await refresh();
+    }
+
+    async function startProtocolLogin() {
+      const appleId = $('protocolAppleId').value.trim();
+      const data = await api('/api/icloud/protocol-login/start', {method:'POST', body: JSON.stringify({
+        apple_id: appleId,
+        password: $('protocolPassword').value
+      })});
+      $('protocolPassword').value = '';
+      if (data.needs_2fa) {
+        protocolPendingID = data.pending_id || '';
+        log(`${data.message || '需要 2FA'}：${data.apple_id || appleId}，有效期 ${data.expires_at || '-'}`);
+        $('icloudSessionInfo').textContent = `${data.message || '需要 2FA'}\n账号：${data.apple_id || appleId}\n有效期：${data.expires_at || '-'}`;
+        return;
+      }
+      renderICloudSession(data.session);
+      log('协议登录成功：' + (data.session.apple_id || appleId));
+      await refresh();
+    }
+
+    async function submitProtocol2FA() {
+      if (!protocolPendingID) {
+        log('没有待验证的协议登录，请先点击“协议登录”');
+        return;
+      }
+      const data = await api('/api/icloud/protocol-login/2fa', {method:'POST', body: JSON.stringify({
+        pending_id: protocolPendingID,
+        code: $('protocol2FA').value.trim()
+      })});
+      protocolPendingID = '';
+      $('protocol2FA').value = '';
+      renderICloudSession(data.session);
+      log('协议 2FA 登录成功：' + (data.session.apple_id || '-'));
       await refresh();
     }
 

@@ -7,6 +7,7 @@
 - 支持本地 Web 面板。
 - 支持录入 iCloud 账号标签。
 - 支持手动导入已经创建好的隐私邮箱。
+- 支持 Go 后端 Apple SRP 协议登录 iCloud，收到 2FA 后直接保存本地登录态。
 - 支持通过比特浏览器手动登录 iCloud 后保存本地登录态。
 - 支持协议调用 iCloud Hide My Email `generate + reserve` 创建隐私邮箱。
 - 支持纯 Go 协议同步 iCloud Mail `mccgateway` 邮件服务并提取验证码，取码时不依赖浏览器页面执行脚本。
@@ -50,6 +51,7 @@ Copy-Item .\config.example.json .\config.json
 | `bit_browser_id` | 固定比特浏览器窗口 ID，可留空自动新建 |
 | `icloud_login_url` | 手动登录打开地址，默认 `https://www.icloud.com.cn/icloudplus/` |
 | `icloud_default_host` | 保存登录态时校验用 iCloud host，默认 `www.icloud.com.cn` |
+| `icloud_client_id` | Apple Web OAuth 公共 Client ID；默认使用当前 iCloud Web 公开 widget key，通常不用改 |
 
 `config.json`、`data/`、`logs/`、`captures/` 默认不会提交 Git。
 
@@ -73,19 +75,30 @@ Copy-Item .\config.example.json .\config.json
 
 ## 使用流程
 
-### 方式一：协议创建隐私邮箱
+### 方式一：协议登录 + 协议创建隐私邮箱
 
-1. 启动比特浏览器本地服务。
-2. 在面板 `iCloud 协议登录态` 点击 `打开登录窗口`。
-3. 在打开的窗口里手动登录 iCloud，并确认账号具备 iCloud+ / Hide My Email 权限。
-4. 回到面板点击 `保存登录态`。这一步只读取当前窗口 Cookie，并由 Go 后端直接请求 `setup/ws/1/validate` 校验登录态。
-5. 保存成功后点击 `协议创建邮箱`，后端会调用：
+1. 在面板 `1. 保存登录态` 输入 Apple ID 和密码，点击 `协议登录`。
+2. 后端会按 Apple SRP 流程请求 `signin/init` 和 `signin/complete`；密码只在本机进程内参与 SRP 计算，不写入日志和 `data/state.json`。
+3. 如果 Apple 要求 2FA，受信任设备允许后，把 6 位验证码填入面板，点击 `提交 2FA`。
+4. 验证通过后，后端调用 `2sv/trust`、`accountLogin` 和 `setup/ws/1/validate` 生成本地 iCloud 登录态。
+5. 确认账号具备 iCloud+ / Hide My Email 权限。
+6. 保存成功后点击 `协议创建邮箱`，后端会调用：
    - `POST /v1/hme/generate`
    - `POST /v1/hme/reserve`
-6. 创建成功的邮箱会自动写入本地邮箱列表，并生成独立 API 地址。
-7. 收到验证码邮件后，取码 API 会用 Go 后端纯协议同步 iCloud 邮件并提取 6 位验证码；也可以在面板点击 `同步邮件` 手动触发。
+7. 创建成功的邮箱会自动写入本地邮箱列表，并生成独立 API 地址。
+8. 收到验证码邮件后，取码 API 会用 Go 后端纯协议同步 iCloud 邮件并提取 6 位验证码；也可以在面板点击 `同步邮件` 手动触发。
 
-### 方式二：手动导入已有隐私邮箱
+### 方式二：浏览器兜底登录 + 协议创建隐私邮箱
+
+如果 Apple 当前风控不允许 SRP 协议登录，可展开 `浏览器兜底 / 高级连接参数`：
+
+1. 启动比特浏览器本地服务。
+2. 点击 `打开登录窗口`。
+3. 在打开的窗口里手动登录 iCloud。
+4. 回到面板点击 `保存登录态`。这一步只读取当前窗口 Cookie，并由 Go 后端直接请求 `setup/ws/1/validate` 校验登录态。
+5. 后续创建邮箱和取码仍然走 Go 后端协议。
+
+### 方式三：手动导入已有隐私邮箱
 
 1. 在外部 iCloud/隐私邮箱平台创建好邮箱。
 2. 在本项目面板里添加 iCloud 账号标签。
@@ -112,13 +125,15 @@ Copy-Item .\config.example.json .\config.json
 相关接口：
 
 ```http
+POST /api/icloud/protocol-login/start
+POST /api/icloud/protocol-login/2fa
 POST /api/icloud/browser/open
 POST /api/icloud/session/save
 GET  /api/icloud/session
 POST /api/icloud/mailboxes/create
 ```
 
-登录态过期、iCloud 权限变化或 Apple 要求重新验证时，需要重新打开登录窗口并保存登录态。
+登录态过期、iCloud 权限变化或 Apple 要求重新验证时，优先重新走协议登录；如果 Apple 风控拦截，再用浏览器兜底登录保存 Cookie。
 
 ## 对外取码 API
 
@@ -271,8 +286,9 @@ X-Admin-Key: <admin_key>
 
 ## 当前限制
 
-- Apple 登录仍然需要手动完成；项目只保存手动登录后的本地会话。
-- 登录态可能过期；过期后需要重新打开窗口登录并保存。
+- Apple SRP 协议登录依赖 iCloud Web 当前公开接口；Apple 风控、地区端点或安全策略变化时可能需要临时使用浏览器兜底。
+- 2FA pending 登录态只保存在进程内，服务重启后需要重新发起协议登录。
+- 登录态可能过期；过期后需要重新协议登录或浏览器兜底保存。
 - 邮件同步依赖 iCloud 网页服务接口和当前登录态；Apple 页面/接口变化时需要重新适配。
 - iCloud Cookie 属于敏感数据，只能保存在本机 `data/`，不要打包给别人。
 - 对外部署时不要把管理面板裸露在公网；至少配置 `admin_key`，并优先通过反向代理加 HTTPS。

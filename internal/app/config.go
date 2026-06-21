@@ -19,6 +19,7 @@ type Config struct {
 	BitBrowserID      string `json:"bit_browser_id"`
 	ICloudLoginURL    string `json:"icloud_login_url"`
 	ICloudDefaultHost string `json:"icloud_default_host"`
+	ICloudClientID    string `json:"icloud_client_id"`
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -33,6 +34,7 @@ func LoadConfig(path string) (Config, error) {
 		BitBrowserID:      strings.TrimSpace(os.Getenv("IPM_BIT_BROWSER_ID")),
 		ICloudLoginURL:    "https://www.icloud.com.cn/icloudplus/",
 		ICloudDefaultHost: "www.icloud.com.cn",
+		ICloudClientID:    defaultAppleOAuthClientID,
 	}
 	if path == "" {
 		return cfg, nil
@@ -77,6 +79,9 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if strings.TrimSpace(fromFile.ICloudDefaultHost) != "" {
 		cfg.ICloudDefaultHost = strings.TrimSpace(fromFile.ICloudDefaultHost)
+	}
+	if strings.TrimSpace(fromFile.ICloudClientID) != "" {
+		cfg.ICloudClientID = strings.TrimSpace(fromFile.ICloudClientID)
 	}
 	return cfg, nil
 }
