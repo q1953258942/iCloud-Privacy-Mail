@@ -57,6 +57,51 @@ func (s *FileStore) Snapshot() State {
 	return cloneState(s.state)
 }
 
+func (s *FileStore) Path() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.path
+}
+
+func (s *FileStore) SetPath(path string) (State, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	path = strings.TrimSpace(path)
+	if path == "" {
+		path = filepath.Join("data", "state.json")
+	}
+	if strings.EqualFold(filepath.Ext(path), ".json") {
+		path = filepath.Clean(path)
+	} else {
+		path = filepath.Join(path, "state.json")
+	}
+	current := cloneState(s.state)
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil && len(strings.TrimSpace(string(data))) > 0:
+		var next State
+		if err := json.Unmarshal(data, &next); err != nil {
+			return State{}, err
+		}
+		if next.NextID <= 0 {
+			next.NextID = 1
+		}
+		s.state = next
+	case err == nil:
+		s.state = current
+	case errors.Is(err, os.ErrNotExist):
+		s.state = current
+	default:
+		return State{}, err
+	}
+	s.path = path
+	if err := s.saveLocked(); err != nil {
+		return State{}, err
+	}
+	return cloneState(s.state), nil
+}
+
 func (s *FileStore) AddAccount(label, appleID, note string) (Account, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

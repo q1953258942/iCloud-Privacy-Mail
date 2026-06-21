@@ -9,6 +9,7 @@ import (
 )
 
 type Config struct {
+	ConfigPath        string `json:"-"`
 	Host              string `json:"host"`
 	Port              int    `json:"port"`
 	DataPath          string `json:"data_path"`
@@ -24,6 +25,7 @@ type Config struct {
 
 func LoadConfig(path string) (Config, error) {
 	cfg := Config{
+		ConfigPath:        path,
 		Host:              "127.0.0.1",
 		Port:              8787,
 		DataPath:          filepath.Join("data", "state.json"),
@@ -84,4 +86,33 @@ func LoadConfig(path string) (Config, error) {
 		cfg.ICloudClientID = strings.TrimSpace(fromFile.ICloudClientID)
 	}
 	return cfg, nil
+}
+
+func SaveConfigDataPath(path, dataPath string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return errCode("config_path_missing", "当前启动命令没有配置文件路径，无法持久化运行配置", false)
+	}
+	values := map[string]any{}
+	if data, err := os.ReadFile(path); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+		if err := json.Unmarshal(data, &values); err != nil {
+			return err
+		}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	values["data_path"] = dataPath
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(values, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

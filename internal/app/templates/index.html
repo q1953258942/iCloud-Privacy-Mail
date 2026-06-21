@@ -55,6 +55,7 @@
     h2 { margin: 0; font-size: 17px; letter-spacing: -.01em; }
     .sub { color: var(--muted); margin-top: 7px; line-height: 1.6; }
     .eyebrow { color: var(--green-2); font-size: 12px; font-weight: 900; letter-spacing: .16em; text-transform: uppercase; margin-bottom: 6px; }
+    .hero-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
     main { max-width: 1480px; margin: 0 auto; padding: 22px 28px 34px; }
     .grid { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 14px; margin-bottom: 18px; }
     .card {
@@ -179,6 +180,26 @@
     .inline-details { padding: 0 18px 16px; }
     .inline-details summary { color: var(--muted); cursor: pointer; font-size: 12px; font-weight: 800; padding: 2px 0 8px; }
     .inline-details .field-grid { padding: 8px 0 0; }
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      background: rgba(6, 22, 55, .36);
+      backdrop-filter: blur(10px);
+    }
+    .modal-backdrop.show { display: flex; }
+    .modal {
+      width: min(720px, 100%);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: var(--panel);
+      box-shadow: 0 36px 120px rgba(6, 22, 55, .28);
+      overflow: hidden;
+    }
     @media (max-width: 1120px) {
       .workflow { grid-template-columns: 1fr; }
       .grid { grid-template-columns: repeat(2, 1fr); }
@@ -199,7 +220,10 @@
         <h1>iCloud Privacy Mail</h1>
         <div class="sub">隐私邮箱创建、纯协议同步和 API 工作台。支持 Apple SRP 协议登录；浏览器登录只作为兜底。</div>
       </div>
-      <button class="primary" onclick="refresh()">刷新状态</button>
+      <div class="hero-actions">
+        <button onclick="openRunConfig()">运行配置</button>
+        <button class="primary" onclick="refresh()">刷新状态</button>
+      </div>
     </div>
   </header>
   <main>
@@ -341,6 +365,24 @@
       </details>
     </div>
   </main>
+  <div id="runConfigModal" class="modal-backdrop" onclick="closeRunConfig(event)">
+    <section class="modal" onclick="event.stopPropagation()">
+      <div class="panel-head">
+        <h2>运行配置</h2>
+        <p>配置服务器数据文件夹。登录态、账号、隐私邮箱、验证码邮件都会写入该目录下的 state.json。</p>
+      </div>
+      <div class="notice" id="runConfigInfo">未读取运行配置。</div>
+      <div class="field-grid">
+        <label class="full">服务器数据文件夹<input id="runDataFolder" placeholder="/opt/icloud-privacy-mail/shared/data 或 data"></label>
+      </div>
+      <div class="toolbar">
+        <button class="primary" onclick="saveRunConfig()">保存配置</button>
+        <button onclick="loadRunConfig()">重新读取</button>
+        <button class="ghost" onclick="closeRunConfig()">关闭</button>
+      </div>
+      <div class="hint">说明：这是服务器路径，不是你电脑本地路径。公网取码 API 需要服务器持有这些数据；切换到空目录时会把当前数据迁移到新目录。</div>
+    </section>
+  </div>
   <script>
     const $ = (id) => document.getElementById(id);
     const adminKeyStorage = 'ipm_admin_key';
@@ -414,6 +456,44 @@
       $('adminKey').value = '';
       localStorage.removeItem(adminKeyStorage);
       log('Admin Key 已清空');
+    }
+
+    async function openRunConfig() {
+      $('runConfigModal').classList.add('show');
+      await loadRunConfig();
+    }
+
+    function closeRunConfig(event) {
+      if (event && event.target !== $('runConfigModal')) return;
+      $('runConfigModal').classList.remove('show');
+    }
+
+    async function loadRunConfig() {
+      try {
+        const data = await api('/api/runtime/config');
+        $('runDataFolder').value = data.data_folder || '';
+        $('runConfigInfo').textContent =
+          `当前数据文件：${data.data_path || '-'}\n` +
+          `配置文件：${data.config_path || '-'}\n` +
+          '这些数据保存在服务器，用于公网取码 API。';
+      } catch (err) {
+        $('runConfigInfo').textContent = '读取失败：' + err.message + '\n如果服务端启用了 Admin Key，请先在高级配置里填写并保存。';
+      }
+    }
+
+    async function saveRunConfig() {
+      const folder = $('runDataFolder').value.trim();
+      if (!folder) {
+        log('运行配置保存失败：服务器数据文件夹不能为空');
+        return;
+      }
+      const data = await api('/api/runtime/config', {method:'POST', body: JSON.stringify({data_folder: folder})});
+      $('runConfigInfo').textContent =
+        `${data.message || '运行配置已保存'}\n` +
+        `当前数据文件：${data.data_path || '-'}\n` +
+        `账号 ${data.accounts || 0} / 邮箱 ${data.mailboxes || 0} / 邮件 ${data.messages || 0}`;
+      log('运行配置已保存：' + (data.data_path || folder));
+      await refresh();
     }
 
     function initSessionCheckSettings() {

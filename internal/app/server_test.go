@@ -136,6 +136,37 @@ func TestUpsertMessageDeduplicatesRemoteID(t *testing.T) {
 	}
 }
 
+func TestFileStoreSetPathMigratesAndLoadsState(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.AddAccount("UPI-1", "user@example.com", ""); err != nil {
+		t.Fatal(err)
+	}
+	nextPath := filepath.Join(t.TempDir(), "custom-data", "state.json")
+	state, err := store.SetPath(nextPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.Path() != nextPath {
+		t.Fatalf("Path() = %q, want %q", store.Path(), nextPath)
+	}
+	if len(state.Accounts) != 1 {
+		t.Fatalf("migrated accounts = %d, want 1", len(state.Accounts))
+	}
+
+	other := newTestStore(t)
+	if _, err := other.AddMailbox("", "UPI-2", "alias@icloud.com"); err != nil {
+		t.Fatal(err)
+	}
+	otherPath := other.Path()
+	loaded, err := store.SetPath(otherPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Mailboxes) != 1 || loaded.Mailboxes[0].Email != "alias@icloud.com" {
+		t.Fatalf("loaded state = %+v", loaded)
+	}
+}
+
 func TestLatestMailboxCodeSelectsNewestAndHonorsAfter(t *testing.T) {
 	oldTime := time.Date(2026, 6, 21, 21, 36, 50, 0, time.FixedZone("CST", 8*3600))
 	newTime := oldTime.Add(30 * time.Minute)

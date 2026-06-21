@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -53,6 +54,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/status", s.handleStatus)
 	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	s.mux.HandleFunc("POST /api/v1/mailboxes/claim", s.handleClaimMailbox)
+	s.mux.HandleFunc("GET /api/runtime/config", s.handleRuntimeConfig)
+	s.mux.HandleFunc("POST /api/runtime/config", s.handleUpdateRuntimeConfig)
 	s.mux.HandleFunc("GET /api/icloud/session", s.handleICloudSession)
 	s.mux.HandleFunc("POST /api/icloud/protocol-login/start", s.handleStartICloudProtocolLogin)
 	s.mux.HandleFunc("POST /api/icloud/protocol-login/2fa", s.handleSubmitICloudProtocol2FA)
@@ -151,6 +154,55 @@ func (s *Server) handleClaimMailbox(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"mailbox": s.publicMailbox(r, mailbox),
+	})
+}
+
+func (s *Server) handleRuntimeConfig(w http.ResponseWriter, _ *http.Request) {
+	dataPath := s.store.Path()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":     true,
+		"data_path":   dataPath,
+		"data_folder": filepath.Dir(dataPath),
+		"config_path": s.cfg.ConfigPath,
+	})
+}
+
+func (s *Server) handleUpdateRuntimeConfig(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		DataFolder string `json:"data_folder"`
+	}
+	if err := decodeJSON(r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	dataFolder := strings.TrimSpace(payload.DataFolder)
+	if dataFolder == "" {
+		writeError(w, http.StatusBadRequest, errCode("data_folder_missing", "数据文件夹不能为空", false))
+		return
+	}
+	oldPath := s.store.Path()
+	targetPath := filepath.Join(dataFolder, "state.json")
+	state, err := s.store.SetPath(targetPath)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errCode("data_folder_invalid", "数据文件夹不可用："+err.Error(), false))
+		return
+	}
+	dataPath := s.store.Path()
+	if err := SaveConfigDataPath(s.cfg.ConfigPath, dataPath); err != nil {
+		if _, rollbackErr := s.store.SetPath(oldPath); rollbackErr != nil {
+			s.logger.Error("rollback data path failed", "old_path", oldPath, "err", rollbackErr)
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":     true,
+		"data_path":   dataPath,
+		"data_folder": filepath.Dir(dataPath),
+		"accounts":    len(state.Accounts),
+		"mailboxes":   len(state.Mailboxes),
+		"messages":    len(state.Messages),
+		"message":     "运行配置已保存，后续账号、登录态、邮箱和验证码邮件会写入该服务器数据文件夹",
 	})
 }
 
