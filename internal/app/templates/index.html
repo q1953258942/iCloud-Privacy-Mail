@@ -5,117 +5,318 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>iCloud Privacy Mail</title>
   <style>
-    body { margin: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #03130d; color: #d9fbe8; }
-    header { padding: 22px 28px; border-bottom: 1px solid #063e2a; background: #020d09; }
-    h1 { margin: 0; font-size: 30px; }
-    .sub { color: #8fc7aa; margin-top: 6px; }
-    main { padding: 24px 28px; }
-    .grid { display: grid; grid-template-columns: repeat(4, minmax(170px, 1fr)); gap: 16px; margin-bottom: 24px; }
-    .card { border: 1px solid #075638; border-radius: 14px; padding: 18px; background: rgba(3, 36, 24, .65); min-height: 86px; }
-    .card strong { display: block; color: #39e58b; font-size: 34px; margin-bottom: 8px; }
-    .panel { border: 1px solid #075638; border-radius: 14px; overflow: hidden; background: rgba(0,0,0,.2); margin-bottom: 20px; }
-    .panel h2 { margin: 0; padding: 16px 18px; border-bottom: 1px solid #075638; }
-    .toolbar, .form { display: flex; flex-wrap: wrap; gap: 10px; padding: 14px 18px; align-items: end; }
-    label { display: flex; flex-direction: column; gap: 6px; color: #a7cdb7; font-size: 13px; }
-    input, textarea, select { background: #010806; color: #effff5; border: 1px solid #0b6b45; border-radius: 8px; padding: 10px 11px; min-width: 180px; }
-    textarea { min-width: 360px; min-height: 74px; }
-    button { background: #073b29; color: #d9fbe8; border: 1px solid #0b7d51; border-radius: 8px; padding: 10px 13px; cursor: pointer; }
-    button.primary { background: #29d985; color: #00160d; border-color: #29d985; font-weight: 700; }
-    button.danger { border-color: #bd3d32; color: #ff8b82; background: #290806; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { border-top: 1px solid #063e2a; padding: 11px 12px; text-align: left; vertical-align: middle; }
-    th { color: #8fc7aa; font-weight: 600; }
-    .pill { display: inline-block; border: 1px solid #0b7d51; border-radius: 999px; padding: 3px 9px; color: #39e58b; }
-    .muted { color: #7fa28e; }
-    .notice { color: #bff7d4; padding: 0 18px 14px; line-height: 1.7; }
-    .log { background: #010806; border-top: 1px solid #063e2a; padding: 14px 18px; white-space: pre-wrap; min-height: 80px; color: #c4ffe0; }
-    @media (max-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } table { font-size: 12px; } }
+    :root {
+      --bg: #06110c;
+      --bg-soft: #0b1c14;
+      --panel: rgba(7, 22, 16, .92);
+      --panel-2: rgba(10, 31, 22, .72);
+      --line: rgba(67, 220, 140, .16);
+      --line-strong: rgba(67, 220, 140, .32);
+      --text: #e8fff1;
+      --muted: #8fb9a2;
+      --faint: #5f8672;
+      --green: #35e28a;
+      --green-2: #9dffd0;
+      --orange: #ffcc7a;
+      --red: #ff7f73;
+      --shadow: 0 24px 80px rgba(0, 0, 0, .34);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 18% -10%, rgba(44, 226, 133, .16), transparent 30%),
+        radial-gradient(circle at 92% 8%, rgba(20, 111, 74, .22), transparent 32%),
+        linear-gradient(180deg, #06110c 0%, #030705 100%);
+      color: var(--text);
+    }
+    button, input, textarea, select { font: inherit; }
+    header {
+      border-bottom: 1px solid var(--line);
+      background: rgba(2, 9, 6, .78);
+      backdrop-filter: blur(18px);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .hero {
+      max-width: 1480px;
+      margin: 0 auto;
+      padding: 22px 28px;
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: center;
+    }
+    h1 { margin: 0; font-size: 28px; letter-spacing: -.03em; }
+    h2 { margin: 0; font-size: 17px; letter-spacing: -.01em; }
+    .sub { color: var(--muted); margin-top: 7px; line-height: 1.6; }
+    .eyebrow { color: var(--green); font-size: 12px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; margin-bottom: 6px; }
+    main { max-width: 1480px; margin: 0 auto; padding: 22px 28px 34px; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 14px; margin-bottom: 18px; }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 18px;
+      background: linear-gradient(180deg, rgba(13, 42, 29, .78), rgba(5, 18, 13, .82));
+      box-shadow: 0 14px 40px rgba(0, 0, 0, .18);
+    }
+    .card strong { display: block; color: var(--green-2); font-size: 34px; line-height: 1; margin-bottom: 10px; letter-spacing: -.04em; }
+    .card span { color: var(--muted); font-size: 13px; }
+    .layout { display: grid; gap: 18px; align-items: start; }
+    .workflow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; align-items: stretch; }
+    .stack { display: grid; gap: 18px; }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      overflow: hidden;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+    .panel-head {
+      padding: 17px 18px 14px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(13, 39, 28, .72), rgba(6, 21, 15, .36));
+    }
+    .panel-head p { margin: 5px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .toolbar, .form { display: flex; flex-wrap: wrap; gap: 10px; padding: 16px 18px; align-items: end; }
+    .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 16px 18px; }
+    .field-grid .full, .form .full { grid-column: 1 / -1; }
+    .panel-body { padding-bottom: 2px; }
+    label { display: flex; flex-direction: column; gap: 7px; color: var(--muted); font-size: 12px; font-weight: 700; }
+    input, textarea, select {
+      width: 100%;
+      min-width: 0;
+      background: rgba(1, 8, 6, .78);
+      color: var(--text);
+      border: 1px solid var(--line-strong);
+      border-radius: 12px;
+      padding: 11px 12px;
+      outline: none;
+      transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
+    }
+    input:focus, textarea:focus, select:focus {
+      border-color: rgba(53, 226, 138, .72);
+      box-shadow: 0 0 0 3px rgba(53, 226, 138, .12);
+      background: rgba(1, 12, 8, .94);
+    }
+    textarea { min-height: 88px; resize: vertical; }
+    button {
+      background: rgba(12, 48, 33, .86);
+      color: var(--text);
+      border: 1px solid var(--line-strong);
+      border-radius: 12px;
+      padding: 10px 13px;
+      cursor: pointer;
+      transition: transform .12s ease, border-color .12s ease, background .12s ease;
+      white-space: nowrap;
+    }
+    button:hover { transform: translateY(-1px); border-color: rgba(53, 226, 138, .68); background: rgba(15, 65, 43, .92); }
+    button.primary { background: linear-gradient(135deg, #35e28a, #9dffd0); color: #04130c; border-color: transparent; font-weight: 800; }
+    button.danger { border-color: rgba(255, 127, 115, .46); color: #ffb0a9; background: rgba(64, 13, 9, .56); }
+    button.ghost { background: transparent; }
+    .notice {
+      margin: 14px 18px 0;
+      padding: 12px 13px;
+      color: #c9ffe0;
+      line-height: 1.65;
+      white-space: pre-wrap;
+      background: rgba(8, 35, 24, .62);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+    }
+    .hint { color: var(--faint); font-size: 12px; line-height: 1.6; padding: 0 18px 16px; }
+    .table-wrap { overflow: auto; }
+    table { width: 100%; border-collapse: collapse; min-width: 940px; }
+    th, td { border-top: 1px solid rgba(67, 220, 140, .12); padding: 13px 14px; text-align: left; vertical-align: middle; }
+    th { color: var(--muted); font-size: 12px; font-weight: 800; background: rgba(5, 18, 13, .45); position: sticky; top: 0; }
+    tbody tr:hover { background: rgba(53, 226, 138, .045); }
+    .mail-title { font-weight: 800; }
+    .email { color: #d9fff0; font-weight: 700; }
+    .token-mask { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+    .muted { color: var(--faint); }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      border: 1px solid rgba(53, 226, 138, .35);
+      border-radius: 999px;
+      padding: 4px 9px;
+      color: var(--green-2);
+      background: rgba(53, 226, 138, .08);
+      font-size: 12px;
+      font-weight: 800;
+      margin: 2px 4px 2px 0;
+    }
+    .pill.off, .status-failed, .status-disabled { color: #ffb0a9; border-color: rgba(255, 127, 115, .4); background: rgba(255, 127, 115, .08); }
+    .status-used { color: var(--orange); border-color: rgba(255, 204, 122, .38); background: rgba(255, 204, 122, .08); }
+    .status-available, .status-active { color: var(--green-2); }
+    .row-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .row-actions button, .row-actions select { width: auto; min-width: 0; padding: 8px 10px; border-radius: 10px; font-size: 12px; }
+    .log {
+      margin: 0;
+      background: #020806;
+      border-top: 1px solid rgba(67, 220, 140, .12);
+      padding: 16px 18px;
+      white-space: pre-wrap;
+      min-height: 210px;
+      max-height: 360px;
+      overflow: auto;
+      color: #c4ffe0;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.7;
+    }
+    details.panel summary { list-style: none; cursor: pointer; }
+    details.panel summary::-webkit-details-marker { display: none; }
+    .inline-details { padding: 0 18px 16px; }
+    .inline-details summary { color: var(--muted); cursor: pointer; font-size: 12px; font-weight: 800; padding: 2px 0 8px; }
+    .inline-details .field-grid { padding: 8px 0 0; }
+    @media (max-width: 1120px) {
+      .workflow { grid-template-columns: 1fr; }
+      .grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 680px) {
+      .hero, main { padding-left: 16px; padding-right: 16px; }
+      .hero { align-items: flex-start; flex-direction: column; }
+      .grid, .field-grid { grid-template-columns: 1fr; }
+      .card strong { font-size: 28px; }
+    }
   </style>
 </head>
 <body>
   <header>
-    <h1>iCloud Privacy Mail</h1>
-    <div class="sub">隐私邮箱创建、纯协议同步和 API 工作台。浏览器只用于人工登录保存 Cookie，取码由 Go 后端直接请求 iCloud Mail。</div>
+    <div class="hero">
+      <div>
+        <div class="eyebrow">Pure Protocol Console</div>
+        <h1>iCloud Privacy Mail</h1>
+        <div class="sub">隐私邮箱创建、纯协议同步和 API 工作台。浏览器只用于人工登录保存 Cookie，取码由 Go 后端直接请求 iCloud Mail。</div>
+      </div>
+      <button class="primary" onclick="refresh()">刷新状态</button>
+    </div>
   </header>
   <main>
     <section class="grid">
-      <div class="card"><strong id="accountCount">0</strong>iCloud 账号</div>
-      <div class="card"><strong id="mailboxCount">0</strong>隐私邮箱</div>
-      <div class="card"><strong id="messageCount">0</strong>邮件</div>
-      <div class="card"><strong id="apiStatus">-</strong>API 状态</div>
+      <div class="card"><strong id="accountCount">0</strong><span>登录账号</span></div>
+      <div class="card"><strong id="mailboxCount">0</strong><span>隐私邮箱</span></div>
+      <div class="card"><strong id="messageCount">0</strong><span>验证码邮件</span></div>
+      <div class="card"><strong id="apiStatus">-</strong><span>API 状态</span></div>
     </section>
 
-    <section class="panel">
-      <h2>服务配置</h2>
-      <div class="notice" id="serviceInfo">未刷新服务状态。</div>
-      <div class="form">
-        <label>Admin Key<input id="adminKey" type="password" placeholder="管理接口启用时填写；只保存到本机浏览器"></label>
-        <button onclick="saveAdminKey()">保存 Admin Key</button>
-        <button onclick="clearAdminKey()">清空 Admin Key</button>
-        <button onclick="refresh()">刷新状态</button>
-      </div>
-    </section>
+    <div class="layout">
+      <section class="workflow">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>1. 保存登录态</h2>
+            <p>手动登录一次 iCloud，后续创建邮箱和取码走 Go 纯协议。</p>
+          </div>
+          <div class="notice" id="icloudSessionInfo">未保存登录态。点击打开登录窗口，手动登录完成后保存登录态。</div>
+          <div class="toolbar">
+            <button onclick="openICloudLogin()">打开登录窗口</button>
+            <button class="primary" onclick="saveICloudSession()">保存登录态</button>
+          </div>
+          <details class="inline-details">
+            <summary>高级连接参数</summary>
+            <div class="field-grid">
+              <label>比特浏览器 ID<input id="browserId" placeholder="可留空，自动新建窗口"></label>
+              <label>CDP HTTP<input id="cdpHttp" placeholder="自动填入，如 127.0.0.1:55240"></label>
+            </div>
+          </details>
+        </section>
 
-    <section class="panel">
-      <h2>iCloud 账号</h2>
-      <div class="form">
-        <label>标签<input id="accountLabel" placeholder="UPI-70"></label>
-        <label>Apple ID<input id="appleId" placeholder="只本地保存，可留空"></label>
-        <label>备注<input id="accountNote" placeholder="备注"></label>
-        <button class="primary" onclick="createAccount()">保存账号</button>
-      </div>
-    </section>
+        <section class="panel">
+          <div class="panel-head">
+            <h2>2. 协议创建邮箱</h2>
+            <p>从当前 iCloud+ 账号生成 Hide My Email 地址。</p>
+          </div>
+          <div class="field-grid">
+            <label>标签<input id="protoLabel" placeholder="UPI-70-13"></label>
+            <label>账号 ID<input id="protoAccountId" placeholder="可留空"></label>
+            <label class="full">备注<input id="protoNote" placeholder="选填"></label>
+          </div>
+          <div class="toolbar">
+            <button class="primary" onclick="createICloudMailbox()">创建隐私邮箱</button>
+          </div>
+        </section>
 
-    <section class="panel">
-      <h2>iCloud 协议登录态</h2>
-      <div class="notice" id="icloudSessionInfo">未保存登录态。点击打开登录窗口，手动登录完成后保存登录态。</div>
-      <div class="form">
-        <label>比特浏览器 ID<input id="browserId" placeholder="可留空，自动新建窗口"></label>
-        <label>CDP HTTP<input id="cdpHttp" placeholder="自动填入，如 127.0.0.1:55240"></label>
-        <button onclick="openICloudLogin()">打开登录窗口</button>
-        <button class="primary" onclick="saveICloudSession()">保存登录态</button>
-      </div>
-      <div class="form">
-        <label>账号 ID<input id="protoAccountId" placeholder="可留空"></label>
-        <label>标签<input id="protoLabel" placeholder="UPI-70-13"></label>
-        <label>备注<input id="protoNote" placeholder="选填"></label>
-        <button class="primary" onclick="createICloudMailbox()">协议创建邮箱</button>
-      </div>
-    </section>
+        <section class="panel">
+          <div class="panel-head">
+            <h2>3. 导入已有邮箱</h2>
+            <p>已有 Hide My Email 地址可以直接导入生成取码 API。</p>
+          </div>
+          <div class="field-grid">
+            <label>标签<input id="mailLabel" placeholder="UPI-70-13"></label>
+            <label>账号 ID<input id="mailAccountId" placeholder="可留空"></label>
+            <label class="full">邮箱地址<input id="mailEmail" placeholder="alias@icloud.com"></label>
+          </div>
+          <div class="toolbar">
+            <button onclick="createMailbox()">导入邮箱</button>
+          </div>
+        </section>
+      </section>
 
-    <section class="panel">
-      <h2>隐私邮箱</h2>
-      <div class="form">
-        <label>账号 ID<input id="mailAccountId" placeholder="可留空"></label>
-        <label>标签<input id="mailLabel" placeholder="UPI-70-13"></label>
-        <label>邮箱<input id="mailEmail" placeholder="alias@icloud.com"></label>
-        <button class="primary" onclick="createMailbox()">创建/导入邮箱</button>
-      </div>
-      <table>
-        <thead><tr><th>标签</th><th>邮箱</th><th>状态</th><th>收件</th><th>API</th><th>操作</th></tr></thead>
-        <tbody id="mailboxes"></tbody>
-      </table>
-    </section>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>隐私邮箱池</h2>
+          <p>主要操作区：复制 API、取验证码、同步邮件、改状态。</p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>标签</th><th>邮箱</th><th>状态</th><th>收件</th><th>API</th><th>操作</th></tr></thead>
+            <tbody id="mailboxes"></tbody>
+          </table>
+        </div>
+      </section>
 
-    <section class="panel">
-      <h2>邮件导入测试</h2>
-      <div class="form">
-        <label>邮箱 ID<input id="msgMailboxId" placeholder="mbx_000002"></label>
-        <label>标题<input id="msgSubject" placeholder="Your OpenAI code is 123456"></label>
-        <label>发件人<input id="msgFrom" placeholder="noreply@example.com"></label>
-        <label>正文<textarea id="msgBody" placeholder="Your verification code is 123456."></textarea></label>
-        <button class="primary" onclick="importMessage()">导入邮件</button>
-      </div>
-    </section>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>运行日志</h2>
+          <p>最近操作倒序显示。</p>
+        </div>
+        <div class="toolbar">
+          <button onclick="refresh()">刷新状态</button>
+          <button onclick="copyLog()">复制日志</button>
+        </div>
+        <div id="log" class="log">等待操作...</div>
+      </section>
 
-    <section class="panel">
-      <h2>日志</h2>
-      <div class="toolbar">
-        <button onclick="refresh()">刷新</button>
-        <button onclick="copyLog()">复制日志</button>
-      </div>
-      <div id="log" class="log">等待操作...</div>
-    </section>
+      <details class="panel">
+        <summary>
+          <div class="panel-head">
+            <h2>高级配置 / 测试工具</h2>
+            <p>Admin Key、账号标签、手动导入测试邮件都收在这里，避免主界面杂乱。</p>
+          </div>
+        </summary>
+        <div class="notice" id="serviceInfo">未刷新服务状态。</div>
+        <div class="field-grid">
+          <label class="full">Admin Key<input id="adminKey" type="password" placeholder="管理接口启用时填写；只保存到本机浏览器"></label>
+        </div>
+        <div class="toolbar">
+          <button class="primary" onclick="saveAdminKey()">保存 Admin Key</button>
+          <button class="ghost" onclick="clearAdminKey()">清空</button>
+          <button class="ghost" onclick="refresh()">刷新服务状态</button>
+        </div>
+        <div class="field-grid">
+          <label>账号标签<input id="accountLabel" placeholder="UPI-70"></label>
+          <label>Apple ID<input id="appleId" placeholder="只本地保存，可留空"></label>
+          <label class="full">备注<input id="accountNote" placeholder="备注"></label>
+        </div>
+        <div class="toolbar">
+          <button onclick="createAccount()">保存账号标签</button>
+        </div>
+        <div class="field-grid">
+          <label>邮箱 ID<input id="msgMailboxId" placeholder="mbx_000002"></label>
+          <label>发件人<input id="msgFrom" placeholder="noreply@example.com"></label>
+          <label class="full">标题<input id="msgSubject" placeholder="Your OpenAI code is 123456"></label>
+          <label class="full">正文<textarea id="msgBody" placeholder="Your verification code is 123456."></textarea></label>
+        </div>
+        <div class="toolbar">
+          <button onclick="importMessage()">导入测试邮件</button>
+        </div>
+      </details>
+    </div>
   </main>
   <script>
     const $ = (id) => document.getElementById(id);
@@ -168,7 +369,8 @@
 
     async function refresh() {
       const [status, boxes] = await Promise.all([api('/api/status'), api('/api/mailboxes')]);
-      $('accountCount').textContent = status.accounts;
+      const sessionSaved = !!(status.icloud_session && status.icloud_session.saved);
+      $('accountCount').textContent = Math.max(Number(status.accounts || 0), sessionSaved ? 1 : 0);
       $('mailboxCount').textContent = status.mailboxes;
       $('messageCount').textContent = status.messages;
       $('apiStatus').textContent = status.admin_key_required ? 'admin key' : (status.api_key_configured ? 'global key' : 'per-mailbox');
@@ -180,12 +382,16 @@
       lastMailboxes = boxes.mailboxes || [];
       $('mailboxes').innerHTML = lastMailboxes.map(row => `
         <tr>
-          <td>${esc(row.label || '-')}<br><span class="muted">${esc(row.id)}</span></td>
-          <td>${esc(row.email)}</td>
-          <td><span class="pill">API ${row.api_active ? 'active' : 'off'}</span> <span class="pill">iCloud ${row.icloud_active ? 'active' : 'off'}</span><br><span class="muted">${esc(row.status)}</span></td>
-          <td>${row.receive_count || 0}</td>
-          <td><span class="muted">${esc(row.api_token_mask || '')}</span></td>
+          <td><div class="mail-title">${esc(row.label || '-')}</div><span class="muted">${esc(row.id)}</span></td>
+          <td><span class="email">${esc(row.email)}</span></td>
           <td>
+            <span class="pill ${row.api_active ? '' : 'off'}">API ${row.api_active ? 'active' : 'off'}</span>
+            <span class="pill ${row.icloud_active ? '' : 'off'}">iCloud ${row.icloud_active ? 'active' : 'off'}</span>
+            <br><span class="pill ${statusClass(row.status)}">${statusText(row.status)}</span>
+          </td>
+          <td>${row.receive_count || 0}</td>
+          <td><span class="muted token-mask">${esc(row.api_token_mask || '')}</span></td>
+          <td><div class="row-actions">
             <button onclick="copyAPI('${row.id}')">API 地址</button>
             <button onclick="verifyMailbox('${row.id}')">验证码</button>
             <button onclick="syncMailbox('${row.id}')">同步邮件</button>
@@ -198,9 +404,18 @@
             </select>
             <button onclick="disableMailbox('${row.id}')">停用 API</button>
             <button class="danger" onclick="deleteMailbox('${row.id}')">删除 API</button>
+          </div>
           </td>
         </tr>
       `).join('');
+    }
+
+    function statusText(status) {
+      return ({available:'可用', used:'已使用', failed:'失败', disabled:'停用', active:'active'}[status] || status || '-');
+    }
+
+    function statusClass(status) {
+      return 'status-' + String(status || 'unknown').replace(/[^a-z0-9_-]/gi, '').toLowerCase();
     }
 
     function renderICloudSession(session) {
@@ -214,10 +429,10 @@
         `Cookie ${session.cookie_count || 0}`
       ].join(' / ');
       $('icloudSessionInfo').textContent =
-        `已保存：${session.apple_id || '-'}，DSID=${session.dsid_mask || '-'}，${flags}\n` +
-        `HME：${session.premium_mail_base_url || '-'}\n` +
-        `邮件网关：${session.mail_gateway_base_url || '-'}，Mail：${session.mail_base_url || '-'}\n` +
-        `构建：${session.client_build_number || '-'}，保存时间：${session.saved_at || '-'}`;
+        `已保存：${session.apple_id || '-'}，DSID=${session.dsid_mask || '-'}\n` +
+        `${flags}\n` +
+        `服务地址已记录：HME / Mail Gateway / Mail\n` +
+        `保存时间：${session.saved_at || '-'}`;
     }
 
     async function createAccount() {
