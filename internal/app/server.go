@@ -890,10 +890,13 @@ func (s *Server) syncMailbox(ctx context.Context, mailbox Mailbox, after time.Ti
 }
 
 func (s *Server) authorized(r *http.Request, mailbox Mailbox) bool {
+	queryKey := strings.TrimSpace(r.URL.Query().Get("key"))
+	if constantTimeEqual(queryKey, mailbox.APIToken) {
+		return true
+	}
 	candidates := []string{
 		strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "),
 		r.Header.Get("X-API-Key"),
-		r.URL.Query().Get("key"),
 	}
 	for _, candidate := range candidates {
 		candidate = strings.TrimSpace(candidate)
@@ -918,7 +921,6 @@ func (s *Server) authorizedGlobalAPI(r *http.Request) bool {
 	candidates := []string{
 		strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "),
 		r.Header.Get("X-API-Key"),
-		r.URL.Query().Get("key"),
 	}
 	for _, candidate := range candidates {
 		candidate = strings.TrimSpace(candidate)
@@ -933,7 +935,6 @@ func requestBrowserKey(r *http.Request) string {
 	return firstNonEmpty(
 		r.Header.Get("X-Browser-Key"),
 		r.Header.Get("X-Client-Key"),
-		r.URL.Query().Get("browser_key"),
 	)
 }
 
@@ -971,8 +972,14 @@ func (s *Server) allowsBrowserKey(r *http.Request) bool {
 	if r.Method == http.MethodGet && r.URL.Path == "/api/icloud/session" {
 		return true
 	}
-	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/icloud/") {
-		return true
+	if r.Method == http.MethodPost {
+		switch r.URL.Path {
+		case "/api/icloud/protocol-login/start",
+			"/api/icloud/protocol-login/2fa",
+			"/api/icloud/session/check",
+			"/api/icloud/mailboxes/create":
+			return true
+		}
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/api/accounts" {
 		return true
@@ -1056,7 +1063,6 @@ func (s *Server) authorizedAdmin(r *http.Request) bool {
 	candidates := []string{
 		strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "),
 		r.Header.Get("X-Admin-Key"),
-		r.URL.Query().Get("admin_key"),
 	}
 	for _, candidate := range candidates {
 		candidate = strings.TrimSpace(candidate)

@@ -170,7 +170,7 @@ GET /api/mailboxes/{id}/code?key=<mailbox_key>&after=<RFC3339>
 
 | 参数 | 说明 |
 | --- | --- |
-| `key` | 必填；单邮箱 key 或全局 `api_key` |
+| `key` | 必填；单邮箱 key。全局 `api_key` 请用 `Authorization`/`X-API-Key` 请求头，不要放 URL |
 | `after` | 建议必填；只接受这个时间之后的新邮件，避免拿旧验证码 |
 | `keyword` | 邮件关键词，默认 `OpenAI` |
 | `allow_stale` | 可选；填 `1/true` 时允许 iCloud 同步失败后回退返回本地缓存旧码，默认不允许 |
@@ -289,6 +289,16 @@ X-Browser-Key: <browser_key>
 ```
 
 浏览器 Key 只能访问和导出自己 Key 名下的数据；Admin Key 不带浏览器 Key 时可导出全量数据。
+Admin Key、浏览器 Key、全局 API Key 只支持请求头提交，不支持 URL 查询参数，避免公网访问日志记录敏感 key。
+
+涉及服务器本机/浏览器连接的兜底接口只允许 Admin Key：
+
+```http
+POST /api/icloud/browser/open
+POST /api/icloud/session/save
+```
+
+普通浏览器 Key 不能调用这两个接口，避免公网部署后被用来连接服务器本机 CDP/比特浏览器服务。
 
 面板里可直接在 `服务配置 -> Admin Key` 填写。
 

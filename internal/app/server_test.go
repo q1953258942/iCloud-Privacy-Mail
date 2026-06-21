@@ -300,6 +300,116 @@ func TestBrowserKeyCannotMutateOtherBrowserMailbox(t *testing.T) {
 	}
 }
 
+func TestBrowserKeyCannotUseBrowserFallbackEndpoints(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{AdminKey: "admin-secret"}, store, discardLogger())
+	browserKey := requestTestBrowserKey(t, handler)
+
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "open bitbrowser",
+			path: "/api/icloud/browser/open",
+			body: `{"browser_id":"local-browser"}`,
+		},
+		{
+			name: "save cdp session",
+			path: "/api/icloud/session/save",
+			body: `{"cdp_http":"127.0.0.1:9222"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Browser-Key", browserKey)
+			handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusUnauthorized {
+				t.Fatalf("%s with browser key = %d body=%s, want 401", tt.path, rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestSensitiveKeysAreNotAcceptedFromQueryString(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{AdminKey: "admin-secret", APIKey: "global-secret"}, store, discardLogger())
+	browserKey := requestTestBrowserKey(t, handler)
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{
+			name:   "admin key query rejected",
+			method: http.MethodGet,
+			path:   "/api/status?admin_key=admin-secret",
+		},
+		{
+			name:   "browser key query rejected",
+			method: http.MethodGet,
+			path:   "/api/status?browser_key=" + browserKey,
+		},
+		{
+			name:   "global api key query rejected on claim",
+			method: http.MethodPost,
+			path:   "/api/v1/mailboxes/claim?key=global-secret",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(`{}`))
+			req.Header.Set("Content-Type", "application/json")
+			handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusUnauthorized {
+				t.Fatalf("%s %s = %d body=%s, want 401", tt.method, tt.path, rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestMailboxCodeQueryAcceptsOnlyPerMailboxToken(t *testing.T) {
+	store := newTestStore(t)
+	mailbox, err := store.AddMailbox("", "UPI-1", "alias@icloud.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddMessage(mailbox.ID, "Your OpenAI code is 135790", "noreply@example.com", "Use 135790 to continue.", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(Config{APIKey: "global-secret"}, store, discardLogger())
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mailboxes/alias%40icloud.com/code?key=global-secret&after=2000-01-01T00:00:00Z", nil)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("code with global query key = %d body=%s, want 401", rr.Code, rr.Body.String())
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/mailboxes/alias%40icloud.com/code?key="+mailbox.APIToken+"&after=2000-01-01T00:00:00Z", nil)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code with mailbox query key = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Success bool   `json:"success"`
+		Code    string `json:"code"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Success || body.Code != "135790" {
+		t.Fatalf("code body = %+v", body)
+	}
+}
+
 func TestLatestMailboxCodeSelectsNewestAndHonorsAfter(t *testing.T) {
 	oldTime := time.Date(2026, 6, 21, 21, 36, 50, 0, time.FixedZone("CST", 8*3600))
 	newTime := oldTime.Add(30 * time.Minute)
