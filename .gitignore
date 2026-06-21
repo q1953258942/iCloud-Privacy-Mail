@@ -1,0 +1,33 @@
+# Build outputs
+bin/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Runtime data
+data/
+logs/
+*.db
+*.sqlite
+*.sqlite3
+
+# Local config / secrets
+config.json
+config.local.json
+*.secret.json
+*.key
+*.pem
+
+# Go
+coverage.out
+*.test
+
+# IDE / OS
+.idea/
+.vscode/
+.vs/
+Thumbs.db
+Desktop.ini
+

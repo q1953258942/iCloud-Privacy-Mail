@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>iCloud Privacy Mail</title>
+  <style>
+    body { margin: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #03130d; color: #d9fbe8; }
+    header { padding: 22px 28px; border-bottom: 1px solid #063e2a; background: #020d09; }
+    h1 { margin: 0; font-size: 30px; }
+    .sub { color: #8fc7aa; margin-top: 6px; }
+    main { padding: 24px 28px; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(170px, 1fr)); gap: 16px; margin-bottom: 24px; }
+    .card { border: 1px solid #075638; border-radius: 14px; padding: 18px; background: rgba(3, 36, 24, .65); min-height: 86px; }
+    .card strong { display: block; color: #39e58b; font-size: 34px; margin-bottom: 8px; }
+    .panel { border: 1px solid #075638; border-radius: 14px; overflow: hidden; background: rgba(0,0,0,.2); margin-bottom: 20px; }
+    .panel h2 { margin: 0; padding: 16px 18px; border-bottom: 1px solid #075638; }
+    .toolbar, .form { display: flex; flex-wrap: wrap; gap: 10px; padding: 14px 18px; align-items: end; }
+    label { display: flex; flex-direction: column; gap: 6px; color: #a7cdb7; font-size: 13px; }
+    input, textarea { background: #010806; color: #effff5; border: 1px solid #0b6b45; border-radius: 8px; padding: 10px 11px; min-width: 180px; }
+    textarea { min-width: 360px; min-height: 74px; }
+    button { background: #073b29; color: #d9fbe8; border: 1px solid #0b7d51; border-radius: 8px; padding: 10px 13px; cursor: pointer; }
+    button.primary { background: #29d985; color: #00160d; border-color: #29d985; font-weight: 700; }
+    button.danger { border-color: #bd3d32; color: #ff8b82; background: #290806; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-top: 1px solid #063e2a; padding: 11px 12px; text-align: left; vertical-align: middle; }
+    th { color: #8fc7aa; font-weight: 600; }
+    .pill { display: inline-block; border: 1px solid #0b7d51; border-radius: 999px; padding: 3px 9px; color: #39e58b; }
+    .muted { color: #7fa28e; }
+    .log { background: #010806; border-top: 1px solid #063e2a; padding: 14px 18px; white-space: pre-wrap; min-height: 80px; color: #c4ffe0; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } table { font-size: 12px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>iCloud Privacy Mail</h1>
+    <div class="sub">隐私邮箱创建、同步和 API 工作台。本 MVP 先支持手动录入已创建的隐私邮箱，再对外提供取码 API。</div>
+  </header>
+  <main>
+    <section class="grid">
+      <div class="card"><strong id="accountCount">0</strong>iCloud 账号</div>
+      <div class="card"><strong id="mailboxCount">0</strong>隐私邮箱</div>
+      <div class="card"><strong id="messageCount">0</strong>邮件</div>
+      <div class="card"><strong id="apiStatus">-</strong>API 状态</div>
+    </section>
+
+    <section class="panel">
+      <h2>iCloud 账号</h2>
+      <div class="form">
+        <label>标签<input id="accountLabel" placeholder="UPI-70"></label>
+        <label>Apple ID<input id="appleId" placeholder="只本地保存，可留空"></label>
+        <label>备注<input id="accountNote" placeholder="备注"></label>
+        <button class="primary" onclick="createAccount()">保存账号</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>隐私邮箱</h2>
+      <div class="form">
+        <label>账号 ID<input id="mailAccountId" placeholder="可留空"></label>
+        <label>标签<input id="mailLabel" placeholder="UPI-70-13"></label>
+        <label>邮箱<input id="mailEmail" placeholder="alias@icloud.com"></label>
+        <button class="primary" onclick="createMailbox()">创建/导入邮箱</button>
+      </div>
+      <table>
+        <thead><tr><th>标签</th><th>邮箱</th><th>状态</th><th>收件</th><th>API</th><th>操作</th></tr></thead>
+        <tbody id="mailboxes"></tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>邮件导入测试</h2>
+      <div class="form">
+        <label>邮箱 ID<input id="msgMailboxId" placeholder="mbx_000002"></label>
+        <label>标题<input id="msgSubject" placeholder="Your OpenAI code is 123456"></label>
+        <label>发件人<input id="msgFrom" placeholder="noreply@example.com"></label>
+        <label>正文<textarea id="msgBody" placeholder="Your verification code is 123456."></textarea></label>
+        <button class="primary" onclick="importMessage()">导入邮件</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>日志</h2>
+      <div class="toolbar">
+        <button onclick="refresh()">刷新</button>
+        <button onclick="copyLog()">复制日志</button>
+      </div>
+      <div id="log" class="log">等待操作...</div>
+    </section>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let lastMailboxes = [];
+
+    async function api(path, options = {}) {
+      const res = await fetch(path, {
+        ...options,
+        headers: {'content-type': 'application/json', ...(options.headers || {})}
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message || data.code || 'request failed');
+      return data;
+    }
+
+    function log(text) {
+      $('log').textContent = new Date().toLocaleTimeString() + ' ' + text + '\n' + $('log').textContent;
+    }
+
+    async function refresh() {
+      const [status, boxes] = await Promise.all([api('/api/status'), api('/api/mailboxes')]);
+      $('accountCount').textContent = status.accounts;
+      $('mailboxCount').textContent = status.mailboxes;
+      $('messageCount').textContent = status.messages;
+      $('apiStatus').textContent = status.api_key_configured ? 'global key' : 'per-mailbox';
+      lastMailboxes = boxes.mailboxes || [];
+      $('mailboxes').innerHTML = lastMailboxes.map(row => `
+        <tr>
+          <td>${esc(row.label || '-')}<br><span class="muted">${esc(row.id)}</span></td>
+          <td>${esc(row.email)}</td>
+          <td><span class="pill">API ${row.api_active ? 'active' : 'off'}</span> <span class="pill">iCloud ${row.icloud_active ? 'active' : 'off'}</span><br><span class="muted">${esc(row.status)}</span></td>
+          <td>${row.receive_count || 0}</td>
+          <td><span class="muted">${esc(row.api_token_mask || '')}</span></td>
+          <td>
+            <button onclick="copyAPI('${row.id}')">API 地址</button>
+            <button onclick="verifyMailbox('${row.id}')">验证码</button>
+            <button onclick="disableMailbox('${row.id}')">停用 API</button>
+            <button class="danger" onclick="deleteMailbox('${row.id}')">删除 API</button>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    async function createAccount() {
+      const data = await api('/api/accounts', {method:'POST', body: JSON.stringify({
+        label: $('accountLabel').value.trim(),
+        apple_id: $('appleId').value.trim(),
+        note: $('accountNote').value.trim()
+      })});
+      log('账号已保存：' + data.account.id);
+      await refresh();
+    }
+
+    async function createMailbox() {
+      const data = await api('/api/mailboxes', {method:'POST', body: JSON.stringify({
+        account_id: $('mailAccountId').value.trim(),
+        label: $('mailLabel').value.trim(),
+        email: $('mailEmail').value.trim()
+      })});
+      $('msgMailboxId').value = data.mailbox.id;
+      log('邮箱已创建：' + data.mailbox.email);
+      await refresh();
+    }
+
+    async function verifyMailbox(id) {
+      const row = lastMailboxes.find(x => x.id === id);
+      if (!row) return;
+      try {
+        const url = new URL(row.api_url);
+        url.searchParams.set('after', new Date(Date.now() - 5 * 60 * 1000).toISOString());
+        const res = await fetch(url.toString());
+        const data = await res.json();
+        log(data.success ? `验证码：${row.email} -> ${data.code}` : `未取到：${data.message || data.code}`);
+      } catch (err) {
+        log('取码失败：' + err.message);
+      }
+    }
+
+    async function disableMailbox(id) {
+      await api(`/api/mailboxes/${encodeURIComponent(id)}/disable`, {method:'POST', body:'{}'});
+      log('已停用：' + id);
+      await refresh();
+    }
+
+    async function deleteMailbox(id) {
+      if (!confirm('确认删除这个 API 绑定？')) return;
+      await api(`/api/mailboxes/${encodeURIComponent(id)}`, {method:'DELETE'});
+      log('已删除：' + id);
+      await refresh();
+    }
+
+    async function importMessage() {
+      const id = $('msgMailboxId').value.trim();
+      await api(`/api/mailboxes/${encodeURIComponent(id)}/messages`, {method:'POST', body: JSON.stringify({
+        subject: $('msgSubject').value.trim(),
+        from: $('msgFrom').value.trim(),
+        body: $('msgBody').value,
+        received_at: new Date().toISOString()
+      })});
+      log('邮件已导入：' + id);
+      await refresh();
+    }
+
+    async function copyAPI(id) {
+      const row = lastMailboxes.find(x => x.id === id);
+      if (!row) return;
+      await navigator.clipboard.writeText(row.api_url);
+      log('已复制 API 地址：' + row.email);
+    }
+
+    async function copyLog() {
+      await navigator.clipboard.writeText($('log').textContent);
+    }
+
+    function esc(value) {
+      return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    refresh().catch(err => log('刷新失败：' + err.message));
+  </script>
+</body>
+</html>
+
