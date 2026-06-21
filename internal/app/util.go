@@ -3,6 +3,7 @@ package app
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"strings"
 	"time"
 )
@@ -13,6 +14,18 @@ func randomToken(bytesLen int) (string, error) {
 		return "", err
 	}
 	return strings.TrimRight(base64.URLEncoding.EncodeToString(buf), "="), nil
+}
+
+func randomUUID() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	buf[6] = (buf[6] & 0x0f) | 0x40
+	buf[8] = (buf[8] & 0x3f) | 0x80
+	hexed := make([]byte, 32)
+	hex.Encode(hexed, buf)
+	return string(hexed[0:8]) + "-" + string(hexed[8:12]) + "-" + string(hexed[12:16]) + "-" + string(hexed[16:20]) + "-" + string(hexed[20:32]), nil
 }
 
 func maskSecret(value string, keep int) string {

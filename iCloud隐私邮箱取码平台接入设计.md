@@ -872,7 +872,7 @@ DELETE /api/v1/mailboxes/{id}
 
 1. 前端新增 `iCloud 协议登录态` 面板。
 2. 支持调用比特浏览器本地 API 打开 iCloud 登录窗口。
-3. 支持用户手动登录后，通过 CDP 读取当前窗口 Cookie，并在页面上下文调用 `setup/ws/1/validate` 校验登录态。
+3. 支持用户手动登录后，通过 CDP 只读取当前窗口 Cookie；登录态校验由 Go 后端直接请求 `setup/ws/1/validate` 完成，不再在页面上下文执行取信/校验脚本。
 4. 登录态只保存到本机 `data/state.json`，不返回 Cookie/Session 原文到前端。
 5. 支持协议创建隐私邮箱：
    - `POST /v1/hme/generate`
@@ -882,7 +882,7 @@ DELETE /api/v1/mailboxes/{id}
 当前已继续实现：
 
 1. 保存登录态时同时记录 `premiummailsettings`、`mccgateway`、`mail` 服务地址。
-2. 支持调用 iCloud Mail `mccgateway` 邮件接口同步收件箱/分类文件夹最近线程。
+2. 支持 Go 后端纯协议调用 iCloud Mail `mccgateway` 邮件接口同步收件箱/分类文件夹最近线程。
 3. 同步时按隐私邮箱别名匹配收件人，只把包含 OTP 的邮件落库。
 4. 对外取码接口会先同步再查本地邮件，避免只依赖手动导入。
 5. 支持 `POST /api/mailboxes/{id}/sync` 手动同步邮件。

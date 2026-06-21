@@ -58,15 +58,11 @@ func (c *CDPSessionClient) SaveICloudSession(ctx context.Context, cdpHTTP, defau
 	if _, err := c.call(ctx, conn, "Network.enable", map[string]any{}); err != nil {
 		return ICloudSession{}, err
 	}
-	if _, err := c.call(ctx, conn, "Runtime.enable", map[string]any{}); err != nil {
-		return ICloudSession{}, err
-	}
-
 	cookies, err := c.readCookies(ctx, conn)
 	if err != nil {
 		return ICloudSession{}, err
 	}
-	validate, err := c.validateICloud(ctx, conn, defaultHost)
+	validate, err := c.validateICloud(ctx, cookies, firstNonEmpty(hostFromURL(target.URL), defaultHost))
 	if err != nil {
 		return ICloudSession{}, err
 	}
@@ -162,7 +158,7 @@ type validateResult struct {
 	CanCreateHME       bool
 }
 
-func (c *CDPSessionClient) validateICloud(ctx context.Context, conn *websocket.Conn, defaultHost string) (validateResult, error) {
+func (c *CDPSessionClient) validateICloud(ctx context.Context, cookies []SessionCookie, defaultHost string) (validateResult, error) {
 	host := strings.TrimSpace(defaultHost)
 	if host == "" {
 		host = "www.icloud.com.cn"
@@ -171,60 +167,50 @@ func (c *CDPSessionClient) validateICloud(ctx context.Context, conn *websocket.C
 	if strings.HasSuffix(host, "icloud.com") && !strings.HasSuffix(host, "icloud.com.cn") {
 		setupHost = "setup.icloud.com"
 	}
-	js := fmt.Sprintf(`(async () => {
-  const build = globalThis.__CW_BUILD_INFO || {};
-  const uuid = () => (crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2);
-  const clientId = uuid();
-  const buildNumber = build.buildNumber || "2618Build21";
-  const masteringNumber = build.masteringNumber || buildNumber;
-  const params = new URLSearchParams({
-    clientBuildNumber: buildNumber,
-    clientMasteringNumber: masteringNumber,
-    clientId: clientId,
-    requestId: uuid()
-  });
-  const res = await fetch("https://%s/setup/ws/1/validate?" + params.toString(), {
-    method: "POST",
-    credentials: "include",
-    headers: {"Content-Type": "text/plain"}
-  });
-  const text = await res.text();
-  return JSON.stringify({ok: res.ok, status: res.status, text, clientId, buildNumber, masteringNumber});
-})()`, setupHost)
-	raw, err := c.call(ctx, conn, "Runtime.evaluate", map[string]any{
-		"expression":    js,
-		"awaitPromise":  true,
-		"returnByValue": true,
-	})
+
+	clientID, err := randomUUID()
 	if err != nil {
 		return validateResult{}, err
 	}
-	var eval struct {
-		Result struct {
-			Type  string `json:"type"`
-			Value string `json:"value"`
-		} `json:"result"`
-		ExceptionDetails any `json:"exceptionDetails"`
-	}
-	if err := json.Unmarshal(raw, &eval); err != nil {
+	requestID, err := randomUUID()
+	if err != nil {
 		return validateResult{}, err
 	}
-	if eval.ExceptionDetails != nil {
-		return validateResult{}, errCode("icloud_validate_failed", "iCloud 登录态校验脚本执行失败", true)
+	buildNumber := "2618Build21"
+	masteringNumber := buildNumber
+
+	u := url.URL{
+		Scheme: "https",
+		Host:   setupHost,
+		Path:   "/setup/ws/1/validate",
 	}
-	var outer struct {
-		OK              bool   `json:"ok"`
-		Status          int    `json:"status"`
-		Text            string `json:"text"`
-		ClientID        string `json:"clientId"`
-		BuildNumber     string `json:"buildNumber"`
-		MasteringNumber string `json:"masteringNumber"`
-	}
-	if err := json.Unmarshal([]byte(eval.Result.Value), &outer); err != nil {
+	q := u.Query()
+	q.Set("clientBuildNumber", buildNumber)
+	q.Set("clientMasteringNumber", masteringNumber)
+	q.Set("clientId", clientID)
+	q.Set("requestId", requestID)
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), nil)
+	if err != nil {
 		return validateResult{}, err
 	}
-	if !outer.OK {
-		return validateResult{}, errCode("icloud_validate_failed", fmt.Sprintf("iCloud 登录态校验失败，HTTP %d", outer.Status), true)
+	session := ICloudSession{Host: host, Cookies: cookies}
+	setICloudFetchHeaders(req, session, "*/*", "text/plain;charset=UTF-8")
+	if cookie := cookieHeader(cookies, u.String()); cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return validateResult{}, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return validateResult{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return validateResult{}, errCode("icloud_validate_failed", fmt.Sprintf("iCloud 登录态校验失败，HTTP %d: %s", resp.StatusCode, trimForError(data)), true)
 	}
 	var account struct {
 		DSInfo struct {
@@ -239,7 +225,7 @@ func (c *CDPSessionClient) validateICloud(ctx context.Context, conn *websocket.C
 			Status string `json:"status"`
 		} `json:"webservices"`
 	}
-	if err := json.Unmarshal([]byte(outer.Text), &account); err != nil {
+	if err := json.Unmarshal(data, &account); err != nil {
 		return validateResult{}, errCode("icloud_validate_bad_response", "iCloud 登录态校验返回无法解析", true)
 	}
 	premium := account.Webservices["premiummailsettings"].URL
@@ -252,9 +238,9 @@ func (c *CDPSessionClient) validateICloud(ctx context.Context, conn *websocket.C
 	return validateResult{
 		AppleID:            appleID,
 		DSID:               account.DSInfo.DSID,
-		ClientID:           outer.ClientID,
-		ClientBuildNumber:  outer.BuildNumber,
-		MasteringNumber:    outer.MasteringNumber,
+		ClientID:           clientID,
+		ClientBuildNumber:  buildNumber,
+		MasteringNumber:    masteringNumber,
 		PremiumMailBaseURL: premium,
 		MailGatewayBaseURL: mailGateway,
 		MailBaseURL:        mail,

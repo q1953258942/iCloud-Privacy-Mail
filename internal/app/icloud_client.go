@@ -124,12 +124,7 @@ func (c *ICloudClient) callEnvelope(ctx context.Context, session ICloudSession, 
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "text/plain")
-	req.Header.Set("Accept", "application/json")
-	origin := iCloudOrigin(session)
-	req.Header.Set("Origin", origin)
-	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36")
+	setICloudFetchHeaders(req, session, "application/json", "text/plain;charset=UTF-8")
 	if cookie := cookieHeader(session.Cookies, rawURL); cookie != "" {
 		req.Header.Set("Cookie", cookie)
 	}
@@ -248,7 +243,7 @@ func (c *ICloudClient) mailFolders(ctx context.Context, session ICloudSession) (
 		},
 		"properties": []string{"identifier", "name", "uidValidity", "unseenCount", "seenDeletedCount", "unseenDeletedCount", "messageCount", "flags"},
 	}
-	if err := c.callMail(ctx, session, "/mailws2/v1/geqs/query", body, "mail", &out); err != nil {
+	if err := c.callMail(ctx, session, "/mailws2/v1/geqs/query", body, "fetchMailboxCountQuery", &out); err != nil {
 		return nil, err
 	}
 	return out.DomainObjects, nil
@@ -337,9 +332,8 @@ func (c *ICloudClient) threadMessages(ctx context.Context, session ICloudSession
 		} `json:"messageMetadataList"`
 	}
 	body := map[string]any{
-		"threadId":        threadID,
-		"includeLabelIds": []string{},
-		"sessionHeaders":  mailSessionHeaders(folder.Name, false),
+		"threadId":       threadID,
+		"sessionHeaders": mailSessionHeaders(folder.Name, false),
 	}
 	if err := c.callMail(ctx, session, "/mailws2/v1/thread/get", body, "", &out); err != nil {
 		return nil, err
@@ -434,12 +428,12 @@ func (c *ICloudClient) callMail(ctx context.Context, session ICloudSession, path
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	origin := iCloudOrigin(session)
-	req.Header.Set("Origin", origin)
-	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36")
+	if clientIntent != "" {
+		req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
+	} else {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	setICloudFetchHeaders(req, session, "*/*", req.Header.Get("Content-Type"))
 	if cookie := cookieHeader(session.Cookies, u); cookie != "" {
 		req.Header.Set("Cookie", cookie)
 	}
@@ -453,7 +447,7 @@ func (c *ICloudClient) callMail(ctx context.Context, session ICloudSession, path
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("icloud mail HTTP %d: %s", resp.StatusCode, trimForError(data))
+		return fmt.Errorf("icloud mail %s HTTP %d: %s", path, resp.StatusCode, trimForError(data))
 	}
 	if result != nil {
 		if err := json.Unmarshal(data, result); err != nil {
@@ -631,8 +625,14 @@ func cookieHeader(cookies []SessionCookie, rawURL string) string {
 		path = "/"
 	}
 	nowUnix := float64(time.Now().Unix())
-	var pairs []string
-	for _, cookie := range cookies {
+	type cookiePair struct {
+		name  string
+		value string
+		order int
+		index int
+	}
+	var pairs []cookiePair
+	for i, cookie := range cookies {
 		if cookie.Name == "" || cookie.Value == "" {
 			continue
 		}
@@ -645,9 +645,57 @@ func cookieHeader(cookies []SessionCookie, rawURL string) string {
 		if cookie.Path != "" && !strings.HasPrefix(path, cookie.Path) {
 			continue
 		}
-		pairs = append(pairs, cookie.Name+"="+cookie.Value)
+		pairs = append(pairs, cookiePair{
+			name:  cookie.Name,
+			value: cookie.Value,
+			order: preferredICloudCookieOrder(cookie.Name),
+			index: i,
+		})
 	}
-	return strings.Join(pairs, "; ")
+	sort.SliceStable(pairs, func(i, j int) bool {
+		if pairs[i].order != pairs[j].order {
+			return pairs[i].order < pairs[j].order
+		}
+		return pairs[i].index < pairs[j].index
+	})
+	out := make([]string, 0, len(pairs))
+	for _, pair := range pairs {
+		out = append(out, pair.name+"="+pair.value)
+	}
+	return strings.Join(out, "; ")
+}
+
+func preferredICloudCookieOrder(name string) int {
+	for i, candidate := range preferredICloudCookies {
+		if candidate == "X_APPLE_WEB_KB-" && strings.HasPrefix(name, candidate) {
+			return i
+		}
+		if candidate != "X_APPLE_WEB_KB-" && name == candidate {
+			return i
+		}
+	}
+	return len(preferredICloudCookies) + 100
+}
+
+var preferredICloudCookies = []string{
+	"X-APPLE-UNIQUE-CLIENT-ID",
+	"X-APPLE-WEBAUTH-USER",
+	"X_APPLE_WEB_KB-",
+	"X-Apple-GCBD-Cookie",
+	"X-APPLE-WEBAUTH-HSA-TRUST",
+	"X-APPLE-WEBAUTH-PCS-Documents",
+	"X-APPLE-WEBAUTH-PCS-Photos",
+	"X-APPLE-WEBAUTH-PCS-Cloudkit",
+	"X-APPLE-WEBAUTH-PCS-Safari",
+	"X-APPLE-WEBAUTH-PCS-Mail",
+	"X-APPLE-WEBAUTH-PCS-Notes",
+	"X-APPLE-WEBAUTH-PCS-News",
+	"X-APPLE-WEBAUTH-PCS-Sharing",
+	"X-APPLE-WEBAUTH-LOGIN",
+	"X-APPLE-DS-WEB-SESSION-TOKEN",
+	"X-APPLE-WEB-ID",
+	"X-APPLE-WEBAUTH-VALIDATE",
+	"X-APPLE-WEBAUTH-TOKEN",
 }
 
 func cookieDomainMatch(host, domain string) bool {
@@ -664,6 +712,27 @@ func trimForError(data []byte) string {
 		return text[:240] + "..."
 	}
 	return text
+}
+
+func setICloudFetchHeaders(req *http.Request, session ICloudSession, accept, contentType string) {
+	if strings.TrimSpace(accept) == "" {
+		accept = "*/*"
+	}
+	req.Header.Set("Accept", accept)
+	if strings.TrimSpace(contentType) != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	origin := iCloudOrigin(session)
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Referer", origin+"/")
+	req.Header.Set("Sec-Fetch-Site", "same-site")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-CH-UA-Platform", `"Windows"`)
+	req.Header.Set("Sec-CH-UA", `"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"`)
+	req.Header.Set("Sec-CH-UA-Mobile", "?0")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36")
 }
 
 func iCloudOrigin(session ICloudSession) string {
