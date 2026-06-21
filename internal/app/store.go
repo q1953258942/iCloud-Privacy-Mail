@@ -57,6 +57,12 @@ func (s *FileStore) Snapshot() State {
 	return cloneState(s.state)
 }
 
+func (s *FileStore) SnapshotForBrowser(browserKey string) State {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return filterStateByBrowserKeyLocked(s.state, strings.TrimSpace(browserKey))
+}
+
 func (s *FileStore) Path() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -102,13 +108,69 @@ func (s *FileStore) SetPath(path string) (State, error) {
 	return cloneState(s.state), nil
 }
 
+func (s *FileStore) EnsureBrowserClient(label, currentKey string, rotate bool) (BrowserClient, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	label = strings.TrimSpace(label)
+	currentKey = strings.TrimSpace(currentKey)
+	if !rotate && currentKey != "" {
+		for i, client := range s.state.BrowserClients {
+			if constantTimeEqual(currentKey, client.Key) {
+				if label != "" {
+					s.state.BrowserClients[i].Label = label
+				}
+				s.state.BrowserClients[i].LastSeenAt = now
+				return s.state.BrowserClients[i], false, s.saveLocked()
+			}
+		}
+	}
+	key, err := randomToken(24)
+	if err != nil {
+		return BrowserClient{}, false, err
+	}
+	client := BrowserClient{
+		Key:        key,
+		Label:      label,
+		CreatedAt:  now,
+		LastSeenAt: now,
+	}
+	if client.Label == "" {
+		client.Label = "浏览器-" + now.Format("0102-150405")
+	}
+	s.state.BrowserClients = append(s.state.BrowserClients, client)
+	return client, true, s.saveLocked()
+}
+
+func (s *FileStore) HasBrowserKey(browserKey string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	browserKey = strings.TrimSpace(browserKey)
+	if browserKey == "" {
+		return false
+	}
+	for _, client := range s.state.BrowserClients {
+		if constantTimeEqual(browserKey, client.Key) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *FileStore) AddAccount(label, appleID, note string) (Account, error) {
+	return s.AddAccountForBrowser("", label, appleID, note)
+}
+
+func (s *FileStore) AddAccountForBrowser(browserKey, label, appleID, note string) (Account, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now()
 	account := Account{
 		ID:           s.nextIDLocked("acc"),
+		BrowserKey:   strings.TrimSpace(browserKey),
 		Label:        strings.TrimSpace(label),
 		AppleID:      strings.TrimSpace(appleID),
 		Status:       StatusActive,
@@ -125,6 +187,10 @@ func (s *FileStore) AddAccount(label, appleID, note string) (Account, error) {
 }
 
 func (s *FileStore) AddMailbox(accountID, label, email string) (Mailbox, error) {
+	return s.AddMailboxForBrowser("", accountID, label, email)
+}
+
+func (s *FileStore) AddMailboxForBrowser(browserKey, accountID, label, email string) (Mailbox, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -148,6 +214,7 @@ func (s *FileStore) AddMailbox(accountID, label, email string) (Mailbox, error) 
 	}
 	mailbox := Mailbox{
 		ID:           s.nextIDLocked("mbx"),
+		BrowserKey:   strings.TrimSpace(browserKey),
 		AccountID:    strings.TrimSpace(accountID),
 		Label:        strings.TrimSpace(label),
 		Email:        email,
@@ -181,20 +248,49 @@ func (s *FileStore) ClaimAvailableMailbox(note string) (Mailbox, error) {
 }
 
 func (s *FileStore) SaveICloudSession(session ICloudSession) error {
+	return s.SaveICloudSessionForBrowser("", session)
+}
+
+func (s *FileStore) SaveICloudSessionForBrowser(browserKey string, session ICloudSession) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	browserKey = strings.TrimSpace(browserKey)
+	session.BrowserKey = browserKey
 	if session.SavedAt.IsZero() {
 		session.SavedAt = time.Now()
+	}
+	if browserKey != "" {
+		for i, existing := range s.state.ICloudSessions {
+			if constantTimeEqual(browserKey, existing.BrowserKey) {
+				s.state.ICloudSessions[i] = session
+				return s.saveLocked()
+			}
+		}
+		s.state.ICloudSessions = append(s.state.ICloudSessions, session)
+		return s.saveLocked()
 	}
 	s.state.ICloudSession = &session
 	return s.saveLocked()
 }
 
 func (s *FileStore) ICloudSession() (ICloudSession, bool) {
+	return s.ICloudSessionForBrowser("")
+}
+
+func (s *FileStore) ICloudSessionForBrowser(browserKey string) (ICloudSession, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	browserKey = strings.TrimSpace(browserKey)
+	if browserKey != "" {
+		for _, session := range s.state.ICloudSessions {
+			if constantTimeEqual(browserKey, session.BrowserKey) {
+				return cloneICloudSession(session), true
+			}
+		}
+		return ICloudSession{}, false
+	}
 	if s.state.ICloudSession == nil {
 		return ICloudSession{}, false
 	}
@@ -214,6 +310,7 @@ func (s *FileStore) AddMessage(mailboxID, subject, from, body string, receivedAt
 	}
 	msg := Message{
 		ID:         s.nextIDLocked("msg"),
+		BrowserKey: s.state.Mailboxes[idx].BrowserKey,
 		MailboxID:  mailboxID,
 		Subject:    strings.TrimSpace(subject),
 		From:       strings.TrimSpace(from),
@@ -239,6 +336,7 @@ func (s *FileStore) UpsertMessage(mailboxID, remoteID, source, subject, from, bo
 	if remoteID != "" {
 		for i, msg := range s.state.Messages {
 			if msg.MailboxID == mailboxID && msg.RemoteID == remoteID {
+				s.state.Messages[i].BrowserKey = s.state.Mailboxes[idx].BrowserKey
 				s.state.Messages[i].Source = strings.TrimSpace(source)
 				s.state.Messages[i].Subject = strings.TrimSpace(subject)
 				s.state.Messages[i].From = strings.TrimSpace(from)
@@ -257,6 +355,7 @@ func (s *FileStore) UpsertMessage(mailboxID, remoteID, source, subject, from, bo
 	}
 	msg := Message{
 		ID:         s.nextIDLocked("msg"),
+		BrowserKey: s.state.Mailboxes[idx].BrowserKey,
 		MailboxID:  mailboxID,
 		RemoteID:   remoteID,
 		Source:     strings.TrimSpace(source),
@@ -383,6 +482,7 @@ func (s *FileStore) saveLocked() error {
 
 func cloneState(in State) State {
 	out := in
+	out.BrowserClients = append([]BrowserClient(nil), in.BrowserClients...)
 	out.Accounts = append([]Account(nil), in.Accounts...)
 	out.Mailboxes = append([]Mailbox(nil), in.Mailboxes...)
 	out.Messages = append([]Message(nil), in.Messages...)
@@ -390,12 +490,60 @@ func cloneState(in State) State {
 		session := cloneICloudSession(*in.ICloudSession)
 		out.ICloudSession = &session
 	}
+	out.ICloudSessions = cloneICloudSessions(in.ICloudSessions)
 	return out
 }
 
 func cloneICloudSession(in ICloudSession) ICloudSession {
 	out := in
 	out.Cookies = append([]SessionCookie(nil), in.Cookies...)
+	return out
+}
+
+func cloneICloudSessions(in []ICloudSession) []ICloudSession {
+	out := make([]ICloudSession, 0, len(in))
+	for _, session := range in {
+		out = append(out, cloneICloudSession(session))
+	}
+	return out
+}
+
+func filterStateByBrowserKeyLocked(in State, browserKey string) State {
+	if browserKey == "" {
+		return cloneState(in)
+	}
+	out := State{NextID: in.NextID}
+	for _, client := range in.BrowserClients {
+		if constantTimeEqual(browserKey, client.Key) {
+			out.BrowserClients = append(out.BrowserClients, client)
+			break
+		}
+	}
+	for _, account := range in.Accounts {
+		if constantTimeEqual(browserKey, account.BrowserKey) {
+			out.Accounts = append(out.Accounts, account)
+		}
+	}
+	allowedMailboxes := make(map[string]struct{})
+	for _, mailbox := range in.Mailboxes {
+		if constantTimeEqual(browserKey, mailbox.BrowserKey) {
+			out.Mailboxes = append(out.Mailboxes, mailbox)
+			allowedMailboxes[mailbox.ID] = struct{}{}
+		}
+	}
+	for _, msg := range in.Messages {
+		if _, ok := allowedMailboxes[msg.MailboxID]; ok || constantTimeEqual(browserKey, msg.BrowserKey) {
+			out.Messages = append(out.Messages, msg)
+		}
+	}
+	for _, session := range in.ICloudSessions {
+		if constantTimeEqual(browserKey, session.BrowserKey) {
+			cloned := cloneICloudSession(session)
+			out.ICloudSession = &cloned
+			out.ICloudSessions = append(out.ICloudSessions, cloned)
+			break
+		}
+	}
 	return out
 }
 

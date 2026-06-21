@@ -12,7 +12,8 @@
 - 支持协议调用 iCloud Hide My Email `generate + reserve` 创建隐私邮箱。
 - 支持纯 Go 协议同步 iCloud Mail `mccgateway` 邮件服务并提取验证码，取码时不依赖浏览器页面执行脚本。
 - 支持手动检测 iCloud Mail 登录态，并可在面板设置每隔几分钟自动检测一次。
-- 支持从 `运行配置` 导出登录账号/登录态和已创建隐私邮箱池数据。
+- 支持每个浏览器自动申请独立浏览器数据 Key，用来隔离登录账号、登录态和隐私邮箱池。
+- 支持从 `运行配置` 导出当前浏览器 Key 名下的登录账号/登录态和已创建隐私邮箱池数据。
 - 支持为每个隐私邮箱生成独立 API 地址。
 - 支持导入邮件测试数据。
 - 支持从邮件标题/正文提取 6 位验证码。
@@ -57,11 +58,14 @@ Copy-Item .\config.example.json .\config.json
 
 `config.json`、`data/`、`logs/`、`captures/` 默认不会提交 Git。
 
+面板会给每个浏览器自动申请一个浏览器数据 Key，并保存到当前浏览器 `localStorage`。后续通过该浏览器创建的账号标签、iCloud 登录态、隐私邮箱和验证码邮件都会绑定到这个 Key；不同浏览器默认互相隔离。
+
 面板右上角 `运行配置` 只提供数据导出，不显示也不修改服务器数据文件夹。服务器状态文件仍由 `config.json` 的 `data_path` 控制，默认写入 `data/state.json`。
 
-- `导出数据` 会导出当前登录账号/登录态和隐私邮箱池数据，包含登录态 Cookie 与邮箱 API token，请妥善保管。
+- `导出数据` 会导出当前浏览器 Key 名下的登录账号/登录态和隐私邮箱池数据，包含登录态 Cookie 与邮箱 API token，请妥善保管。
 - 支持 File System Access API 的浏览器会弹出系统保存位置选择框；不支持时回退为浏览器默认下载。
 - 默认不导出验证码邮件历史；需要排障时可直接在服务端备份完整 `state.json`。
+- 如果要换一套隔离数据，在 `高级配置 / 测试工具` 里点击 `申请新浏览器 Key`；旧 Key 名下的数据不会自动合并到新 Key。
 
 部署到服务器时建议至少配置：
 
@@ -135,6 +139,7 @@ Copy-Item .\config.example.json .\config.json
 相关接口：
 
 ```http
+POST /api/browser-key
 GET  /api/runtime/export
 POST /api/icloud/protocol-login/start
 POST /api/icloud/protocol-login/2fa
@@ -261,20 +266,29 @@ Content-Type: application/json
 
 ## 管理接口
 
-如果配置了 `admin_key`，除以下对外接口外，所有 `/api/` 管理接口都需要 Admin Key：
+如果配置了 `admin_key`，除以下对外接口外，所有 `/api/` 管理接口都需要 Admin Key 或有效浏览器数据 Key：
 
 - `GET /`
+- `POST /api/browser-key`
 - `GET /api/v1/health`
 - `POST /api/v1/mailboxes/claim`
 - `GET /api/v1/mailboxes/{email}/code`
 - `GET /api/mailboxes/{id}/code`
 
-请求头任选一种：
+全局管理员请求头任选一种：
 
 ```http
 X-Admin-Key: <admin_key>
 Authorization: Bearer <admin_key>
 ```
+
+普通浏览器隔离请求头：
+
+```http
+X-Browser-Key: <browser_key>
+```
+
+浏览器 Key 只能访问和导出自己 Key 名下的数据；Admin Key 不带浏览器 Key 时可导出全量数据。
 
 面板里可直接在 `服务配置 -> Admin Key` 填写。
 

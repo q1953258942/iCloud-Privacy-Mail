@@ -338,13 +338,18 @@
         </summary>
         <div class="notice" id="serviceInfo">未刷新服务状态。</div>
         <div class="field-grid">
+          <label class="full">浏览器数据 Key<input id="browserKey" type="password" placeholder="自动申请；只保存到本机浏览器"></label>
           <label class="full">Admin Key<input id="adminKey" type="password" placeholder="管理接口启用时填写；只保存到本机浏览器"></label>
         </div>
         <div class="toolbar">
+          <button class="primary" onclick="requestNewBrowserKey()">申请新浏览器 Key</button>
+          <button onclick="saveBrowserKey()">保存浏览器 Key</button>
+          <button class="ghost" onclick="clearAndRequestBrowserKey()">清空并重新申请</button>
           <button class="primary" onclick="saveAdminKey()">保存 Admin Key</button>
           <button class="ghost" onclick="clearAdminKey()">清空</button>
           <button class="ghost" onclick="refresh()">刷新服务状态</button>
         </div>
+        <div class="hint" id="browserKeyInfo">浏览器 Key 用来隔离本浏览器生成的账号、登录态和隐私邮箱；导出数据时只导出当前 Key 名下的数据。</div>
         <div class="field-grid">
           <label>账号标签<input id="accountLabel" placeholder="UPI-70"></label>
           <label>Apple ID<input id="appleId" placeholder="只本地保存，可留空"></label>
@@ -371,17 +376,18 @@
         <h2>运行配置</h2>
         <p>服务器按配置文件里的默认数据目录保存状态；这里仅用于导出备份。</p>
       </div>
-      <div class="notice" id="runConfigInfo">点击“导出数据”后选择保存位置。导出文件包含登录态 Cookie 和邮箱 API token，请妥善保管。</div>
+      <div class="notice" id="runConfigInfo">点击“导出数据”后选择保存位置。导出文件只包含当前浏览器 Key 名下的数据，并包含登录态 Cookie 和邮箱 API token，请妥善保管。</div>
       <div class="toolbar">
         <button class="primary" onclick="exportRuntimeData()">导出数据</button>
         <button class="ghost" onclick="closeRunConfig()">关闭</button>
       </div>
-      <div class="hint">导出内容：登录账号/登录态 + 已创建隐私邮箱池；默认不包含验证码邮件历史。</div>
+      <div class="hint">导出内容：当前浏览器 Key 的登录账号/登录态 + 已创建隐私邮箱池；默认不包含验证码邮件历史。</div>
     </section>
   </div>
   <script>
     const $ = (id) => document.getElementById(id);
     const adminKeyStorage = 'ipm_admin_key';
+    const browserKeyStorage = 'ipm_browser_key';
     const sessionCheckEnabledStorage = 'ipm_session_check_enabled';
     const sessionCheckMinutesStorage = 'ipm_session_check_minutes';
     let lastMailboxes = [];
@@ -393,6 +399,8 @@
       const headers = {'content-type': 'application/json', ...(options.headers || {})};
       const key = currentAdminKey();
       if (key) headers['X-Admin-Key'] = key;
+      const browserKey = currentBrowserKey();
+      if (browserKey) headers['X-Browser-Key'] = browserKey;
       const res = await fetch(path, {
         ...options,
         headers
@@ -437,6 +445,66 @@
       return (input ? input.value.trim() : '') || localStorage.getItem(adminKeyStorage) || '';
     }
 
+    function currentBrowserKey() {
+      const input = $('browserKey');
+      return (input ? input.value.trim() : '') || localStorage.getItem(browserKeyStorage) || '';
+    }
+
+    function setBrowserKeyInfo(text) {
+      if ($('browserKeyInfo')) $('browserKeyInfo').textContent = text;
+    }
+
+    async function ensureBrowserKey(options = {}) {
+      const rotate = !!options.rotate;
+      const headers = {'content-type': 'application/json'};
+      const current = rotate ? '' : currentBrowserKey();
+      if (current) headers['X-Browser-Key'] = current;
+      const res = await fetch('/api/browser-key', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({rotate})
+      });
+      let data;
+      try {
+        data = await res.json();
+      } catch (err) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+      if (!data.success) throw new Error(data.message || data.code || `HTTP ${res.status}`);
+      localStorage.setItem(browserKeyStorage, data.browser_key);
+      if ($('browserKey')) $('browserKey').value = data.browser_key;
+      setBrowserKeyInfo(`浏览器 Key 已${data.created ? '申请' : '绑定'}：${data.browser_key_mask || '********'}；导出只包含当前浏览器生成的数据。`);
+      return data.browser_key;
+    }
+
+    async function requestNewBrowserKey() {
+      await ensureBrowserKey({rotate: true});
+      log('已申请新的浏览器数据 Key；后续新建数据会绑定到新 Key');
+      await refresh();
+    }
+
+    async function saveBrowserKey() {
+      const key = $('browserKey').value.trim();
+      if (key) {
+        localStorage.setItem(browserKeyStorage, key);
+        await ensureBrowserKey();
+        log('浏览器 Key 已保存并完成后端确认');
+        await refresh();
+      } else {
+        localStorage.removeItem(browserKeyStorage);
+        setBrowserKeyInfo('浏览器 Key 已清空；刷新页面会重新申请。');
+        log('浏览器 Key 已清空');
+      }
+    }
+
+    async function clearAndRequestBrowserKey() {
+      localStorage.removeItem(browserKeyStorage);
+      if ($('browserKey')) $('browserKey').value = '';
+      await ensureBrowserKey({rotate: true});
+      log('已清空并重新申请浏览器数据 Key');
+      await refresh();
+    }
+
     function saveAdminKey() {
       const key = $('adminKey').value.trim();
       if (key) {
@@ -467,6 +535,8 @@
       const headers = {};
       const key = currentAdminKey();
       if (key) headers['X-Admin-Key'] = key;
+      const browserKey = currentBrowserKey();
+      if (browserKey) headers['X-Browser-Key'] = browserKey;
       const res = await fetch('/api/runtime/export', {headers});
       if (!res.ok) {
         let message = `HTTP ${res.status}`;
@@ -583,6 +653,7 @@
       $('serviceInfo').textContent =
         `对外取码：${status.api_key_configured ? '支持全局 key + 单邮箱 key' : '仅单邮箱 key'}；` +
         `管理接口：${status.admin_key_required ? '需要 Admin Key' : '未启用 Admin Key'}；` +
+        `浏览器隔离：${status.browser_key_bound ? '已绑定当前 Key' : '未绑定'}；` +
         `Base URL：${status.base_url || '-'}`;
       renderICloudSession(status.icloud_session);
       lastMailboxes = boxes.mailboxes || [];
@@ -854,8 +925,11 @@
     }
 
     $('adminKey').value = localStorage.getItem(adminKeyStorage) || '';
+    $('browserKey').value = localStorage.getItem(browserKeyStorage) || '';
     initSessionCheckSettings();
-    refresh().catch(err => log('刷新失败：' + err.message));
+    ensureBrowserKey()
+      .then(() => refresh())
+      .catch(err => log('浏览器 Key 初始化失败：' + err.message));
   </script>
 </body>
 </html>

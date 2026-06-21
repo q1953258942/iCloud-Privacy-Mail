@@ -203,6 +203,103 @@ func TestRuntimeExportIncludesAccountsMailboxesAndSession(t *testing.T) {
 	}
 }
 
+func TestBrowserKeyScopesManagementDataAndExport(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{AdminKey: "admin-secret", PublicBaseURL: "https://mail.example"}, store, discardLogger())
+
+	keyA := requestTestBrowserKey(t, handler)
+	keyB := requestTestBrowserKey(t, handler)
+	createTestMailbox(t, handler, keyA, "UPI-A", "a@icloud.com")
+	createTestMailbox(t, handler, keyB, "UPI-B", "b@icloud.com")
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/mailboxes", nil)
+	req.Header.Set("X-Browser-Key", keyA)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list with browser key = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var listBody struct {
+		Mailboxes []publicMailbox `json:"mailboxes"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &listBody); err != nil {
+		t.Fatal(err)
+	}
+	if len(listBody.Mailboxes) != 1 || listBody.Mailboxes[0].Email != "a@icloud.com" {
+		t.Fatalf("scoped list = %+v", listBody.Mailboxes)
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/runtime/export", nil)
+	req.Header.Set("X-Browser-Key", keyA)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("export with browser key = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var exportBody struct {
+		Scope     string    `json:"scope"`
+		Mailboxes []Mailbox `json:"mailboxes"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &exportBody); err != nil {
+		t.Fatal(err)
+	}
+	if exportBody.Scope != "browser" || len(exportBody.Mailboxes) != 1 || exportBody.Mailboxes[0].Email != "a@icloud.com" {
+		t.Fatalf("scoped export = %+v", exportBody)
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/runtime/export", nil)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("export without admin/browser key = %d, want 401", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/runtime/export", nil)
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("admin export = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &exportBody); err != nil {
+		t.Fatal(err)
+	}
+	if exportBody.Scope != "all" || len(exportBody.Mailboxes) != 2 {
+		t.Fatalf("admin export = %+v", exportBody)
+	}
+}
+
+func TestBrowserKeyCannotMutateOtherBrowserMailbox(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{AdminKey: "admin-secret"}, store, discardLogger())
+
+	keyA := requestTestBrowserKey(t, handler)
+	keyB := requestTestBrowserKey(t, handler)
+	mailboxB := createTestMailbox(t, handler, keyB, "UPI-B", "b@icloud.com")
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/mailboxes/"+mailboxB.ID+"/status", strings.NewReader(`{"status":"used"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Browser-Key", keyA)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("other browser mutate = %d body=%s, want 404", rr.Code, rr.Body.String())
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/mailboxes/"+mailboxB.ID+"/status", strings.NewReader(`{"status":"used"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Browser-Key", keyB)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("owner browser mutate = %d body=%s", rr.Code, rr.Body.String())
+	}
+	updated, ok := store.FindMailboxByID(mailboxB.ID)
+	if !ok || updated.Status != StatusUsed {
+		t.Fatalf("stored mailbox = %+v ok=%v", updated, ok)
+	}
+}
+
 func TestLatestMailboxCodeSelectsNewestAndHonorsAfter(t *testing.T) {
 	oldTime := time.Date(2026, 6, 21, 21, 36, 50, 0, time.FixedZone("CST", 8*3600))
 	newTime := oldTime.Add(30 * time.Minute)
@@ -309,6 +406,46 @@ func newTestStore(t *testing.T) *FileStore {
 		t.Fatal(err)
 	}
 	return store
+}
+
+func requestTestBrowserKey(t *testing.T, handler http.Handler) string {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/browser-key", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("browser key status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		BrowserKey string `json:"browser_key"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.BrowserKey == "" {
+		t.Fatalf("empty browser key")
+	}
+	return body.BrowserKey
+}
+
+func createTestMailbox(t *testing.T, handler http.Handler, browserKey, label, email string) publicMailbox {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/mailboxes", strings.NewReader(`{"label":"`+label+`","email":"`+email+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Browser-Key", browserKey)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create mailbox %s = %d body=%s", email, rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Mailbox publicMailbox `json:"mailbox"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	return body.Mailbox
 }
 
 func discardLogger() *slog.Logger {

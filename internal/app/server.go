@@ -42,8 +42,8 @@ func NewServer(cfg Config, store *FileStore, logger *slog.Logger) http.Handler {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if s.requiresAdmin(r) && !s.authorizedAdmin(r) {
-		writeError(w, http.StatusUnauthorized, errCode("admin_auth_required", "管理接口需要 Admin Key", false))
+	if s.requiresAdmin(r) && !s.authorizedAdmin(r) && !(s.allowsBrowserKey(r) && s.authorizedBrowserKey(r)) {
+		writeError(w, http.StatusUnauthorized, errCode("admin_auth_required", "管理接口需要 Admin Key 或浏览器数据 Key", false))
 		return
 	}
 	s.mux.ServeHTTP(w, r)
@@ -51,6 +51,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /", s.handleHome)
+	s.mux.HandleFunc("POST /api/browser-key", s.handleBrowserKey)
 	s.mux.HandleFunc("GET /api/status", s.handleStatus)
 	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	s.mux.HandleFunc("POST /api/v1/mailboxes/claim", s.handleClaimMailbox)
@@ -89,14 +90,44 @@ func (s *Server) handleHome(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(data)
 }
 
+func (s *Server) handleBrowserKey(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		Label  string `json:"label"`
+		Rotate bool   `json:"rotate"`
+	}
+	if r.ContentLength != 0 {
+		if err := decodeJSON(r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+	} else {
+		_ = r.Body.Close()
+	}
+	client, created, err := s.store.EnsureBrowserClient(payload.Label, requestBrowserKey(r), payload.Rotate)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":          true,
+		"created":          created,
+		"browser_key":      client.Key,
+		"browser_key_mask": maskSecret(client.Key, 6),
+		"label":            client.Label,
+		"created_at":       formatTime(client.CreatedAt),
+		"last_seen_at":     formatTime(client.LastSeenAt),
+	})
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	state := s.store.Snapshot()
+	state := s.scopedState(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":            true,
 		"service":            "icloud-privacy-mail",
 		"api_key_configured": strings.TrimSpace(s.cfg.APIKey) != "",
 		"admin_key_required": strings.TrimSpace(s.cfg.AdminKey) != "",
 		"base_url":           requestBaseURL(r),
+		"browser_key_bound":  scopedBrowserKey(r, s.store) != "",
 		"accounts":           len(state.Accounts),
 		"mailboxes":          len(state.Mailboxes),
 		"messages":           len(state.Messages),
@@ -111,6 +142,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	session, ok := s.store.ICloudSession()
 	icloudActive := ok && session.IsICloudPlus && session.CanCreateHME && len(session.Cookies) > 0
+	if !icloudActive {
+		for _, scopedSession := range s.store.Snapshot().ICloudSessions {
+			if scopedSession.IsICloudPlus && scopedSession.CanCreateHME && len(scopedSession.Cookies) > 0 {
+				icloudActive = true
+				break
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":       true,
 		"service":       "icloud-privacy-mail",
@@ -208,28 +247,39 @@ func (s *Server) handleUpdateRuntimeConfig(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleExportRuntimeData(w http.ResponseWriter, r *http.Request) {
-	state := s.store.Snapshot()
+	browserKey := scopedBrowserKey(r, s.store)
+	state := s.scopedState(r)
 	payload := struct {
-		ExportedAt     string         `json:"exported_at"`
-		DataPath       string         `json:"data_path"`
-		NextID         int            `json:"next_id"`
-		Accounts       []Account      `json:"accounts"`
-		Mailboxes      []Mailbox      `json:"mailboxes"`
-		ICloudSession  *ICloudSession `json:"icloud_session,omitempty"`
-		MessageCount   int            `json:"message_count"`
-		Messages       []Message      `json:"messages,omitempty"`
-		IncludeMessage bool           `json:"include_messages"`
+		ExportedAt      string          `json:"exported_at"`
+		Scope           string          `json:"scope"`
+		BrowserKeyMask  string          `json:"browser_key_mask,omitempty"`
+		DataPath        string          `json:"data_path,omitempty"`
+		NextID          int             `json:"next_id"`
+		Accounts        []Account       `json:"accounts"`
+		Mailboxes       []Mailbox       `json:"mailboxes"`
+		ICloudSession   *ICloudSession  `json:"icloud_session,omitempty"`
+		ICloudSessions  []ICloudSession `json:"icloud_sessions,omitempty"`
+		MessageCount    int             `json:"message_count"`
+		Messages        []Message       `json:"messages,omitempty"`
+		IncludeMessages bool            `json:"include_messages"`
 	}{
-		ExportedAt:     formatTime(time.Now()),
-		DataPath:       s.store.Path(),
-		NextID:         state.NextID,
-		Accounts:       state.Accounts,
-		Mailboxes:      state.Mailboxes,
-		ICloudSession:  state.ICloudSession,
-		MessageCount:   len(state.Messages),
-		IncludeMessage: truthy(r.URL.Query().Get("include_messages")),
+		ExportedAt:      formatTime(time.Now()),
+		Scope:           "all",
+		NextID:          state.NextID,
+		Accounts:        state.Accounts,
+		Mailboxes:       state.Mailboxes,
+		ICloudSession:   state.ICloudSession,
+		ICloudSessions:  state.ICloudSessions,
+		MessageCount:    len(state.Messages),
+		IncludeMessages: truthy(r.URL.Query().Get("include_messages")),
 	}
-	if payload.IncludeMessage {
+	if browserKey != "" {
+		payload.Scope = "browser"
+		payload.BrowserKeyMask = maskSecret(browserKey, 6)
+	} else {
+		payload.DataPath = s.store.Path()
+	}
+	if payload.IncludeMessages {
 		payload.Messages = state.Messages
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")
@@ -245,8 +295,8 @@ func (s *Server) handleExportRuntimeData(w http.ResponseWriter, r *http.Request)
 	_, _ = w.Write(append(data, '\n'))
 }
 
-func (s *Server) handleICloudSession(w http.ResponseWriter, _ *http.Request) {
-	session, ok := s.store.ICloudSession()
+func (s *Server) handleICloudSession(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.sessionForRequest(r)
 	if !ok {
 		writeJSON(w, http.StatusOK, map[string]any{"success": true, "session": publicSession(nil)})
 		return
@@ -255,7 +305,8 @@ func (s *Server) handleICloudSession(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleCheckICloudSession(w http.ResponseWriter, r *http.Request) {
-	session, ok := s.store.ICloudSession()
+	browserKey := scopedBrowserKey(r, s.store)
+	session, ok := s.sessionForRequest(r)
 	if !ok {
 		writeError(w, http.StatusBadRequest, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先协议登录或手动保存登录态", true))
 		return
@@ -266,7 +317,7 @@ func (s *Server) handleCheckICloudSession(w http.ResponseWriter, r *http.Request
 		session.LastCheckedAt = checkedAt
 		session.LastCheckOK = false
 		session.LastStatusMessage = "最近检测失败：" + formatTime(checkedAt) + "；iCloud Mail 不可用，请重新协议登录/保存登录态"
-		if saveErr := s.store.SaveICloudSession(session); saveErr != nil {
+		if saveErr := s.store.SaveICloudSessionForBrowser(browserKey, session); saveErr != nil {
 			writeError(w, http.StatusInternalServerError, saveErr)
 			return
 		}
@@ -278,7 +329,7 @@ func (s *Server) handleCheckICloudSession(w http.ResponseWriter, r *http.Request
 	session.LastCheckedAt = checkedAt
 	session.LastCheckOK = true
 	session.LastStatusMessage = "最近检测正常：" + formatTime(checkedAt) + "；iCloud Mail 可同步"
-	if err := s.store.SaveICloudSession(session); err != nil {
+	if err := s.store.SaveICloudSessionForBrowser(browserKey, session); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -322,7 +373,7 @@ func (s *Server) handleStartICloudProtocolLogin(w http.ResponseWriter, r *http.R
 		})
 		return
 	}
-	if err := s.store.SaveICloudSession(result.Session); err != nil {
+	if err := s.store.SaveICloudSessionForBrowser(scopedBrowserKey(r, s.store), result.Session); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -354,7 +405,7 @@ func (s *Server) handleSubmitICloudProtocol2FA(w http.ResponseWriter, r *http.Re
 		return
 	}
 	s.icloudProtocolLogins.delete(payload.PendingID)
-	if err := s.store.SaveICloudSession(session); err != nil {
+	if err := s.store.SaveICloudSessionForBrowser(scopedBrowserKey(r, s.store), session); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -416,7 +467,7 @@ func (s *Server) handleSaveICloudSession(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
-	if err := s.store.SaveICloudSession(session); err != nil {
+	if err := s.store.SaveICloudSessionForBrowser(scopedBrowserKey(r, s.store), session); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -436,7 +487,11 @@ func (s *Server) handleCreateICloudMailbox(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	session, ok := s.store.ICloudSession()
+	if !s.canAccessAccountID(r, payload.AccountID) {
+		writeError(w, http.StatusNotFound, errCode("account_not_found", "账号不存在", false))
+		return
+	}
+	session, ok := s.sessionForRequest(r)
 	if !ok {
 		writeError(w, http.StatusBadRequest, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先手动登录并保存登录态", true))
 		return
@@ -450,7 +505,7 @@ func (s *Server) handleCreateICloudMailbox(w http.ResponseWriter, r *http.Reques
 	if note == "" {
 		note = "created by iCloud protocol"
 	}
-	mailbox, err := s.store.AddMailbox(payload.AccountID, remote.Label, remote.Email)
+	mailbox, err := s.store.AddMailboxForBrowser(scopedBrowserKey(r, s.store), payload.AccountID, remote.Label, remote.Email)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -472,8 +527,8 @@ func (s *Server) handleCreateICloudMailbox(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-func (s *Server) handleListAccounts(w http.ResponseWriter, _ *http.Request) {
-	state := s.store.Snapshot()
+func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
+	state := s.scopedState(r)
 	out := make([]publicAccount, 0, len(state.Accounts))
 	for _, account := range state.Accounts {
 		out = append(out, publicAccount{
@@ -500,7 +555,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	account, err := s.store.AddAccount(payload.Label, payload.AppleID, payload.Note)
+	account, err := s.store.AddAccountForBrowser(scopedBrowserKey(r, s.store), payload.Label, payload.AppleID, payload.Note)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -509,7 +564,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListMailboxes(w http.ResponseWriter, r *http.Request) {
-	state := s.store.Snapshot()
+	state := s.scopedState(r)
 	out := make([]publicMailbox, 0, len(state.Mailboxes))
 	for _, mailbox := range state.Mailboxes {
 		out = append(out, s.publicMailbox(r, mailbox))
@@ -527,7 +582,11 @@ func (s *Server) handleCreateMailbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	mailbox, err := s.store.AddMailbox(payload.AccountID, payload.Label, payload.Email)
+	if !s.canAccessAccountID(r, payload.AccountID) {
+		writeError(w, http.StatusNotFound, errCode("account_not_found", "账号不存在", false))
+		return
+	}
+	mailbox, err := s.store.AddMailboxForBrowser(scopedBrowserKey(r, s.store), payload.AccountID, payload.Label, payload.Email)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -537,6 +596,10 @@ func (s *Server) handleCreateMailbox(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleVerifyMailbox(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !s.canAccessMailboxID(r, id) {
+		writeError(w, http.StatusNotFound, errCode("mailbox_not_found", "邮箱不存在", false))
+		return
+	}
 	active := true
 	mailbox, err := s.store.SetMailboxStatus(id, &active, &active, StatusAvailable, "手动验证通过")
 	if err != nil {
@@ -548,6 +611,10 @@ func (s *Server) handleVerifyMailbox(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDisableMailbox(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !s.canAccessMailboxID(r, id) {
+		writeError(w, http.StatusNotFound, errCode("mailbox_not_found", "邮箱不存在", false))
+		return
+	}
 	inactive := false
 	mailbox, err := s.store.SetMailboxStatus(id, &inactive, nil, StatusDisabled, "API 已停用")
 	if err != nil {
@@ -559,6 +626,10 @@ func (s *Server) handleDisableMailbox(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSetMailboxStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !s.canAccessMailboxID(r, id) {
+		writeError(w, http.StatusNotFound, errCode("mailbox_not_found", "邮箱不存在", false))
+		return
+	}
 	var payload struct {
 		Status       string `json:"status"`
 		Note         string `json:"note"`
@@ -588,6 +659,10 @@ func (s *Server) handleSyncMailbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, errCode("mailbox_not_found", "邮箱不存在", false))
 		return
 	}
+	if !s.canAccessMailbox(r, mailbox) {
+		writeError(w, http.StatusNotFound, errCode("mailbox_not_found", "邮箱不存在", false))
+		return
+	}
 	after, err := parseAfter(r.URL.Query().Get("after"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -602,7 +677,12 @@ func (s *Server) handleSyncMailbox(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteMailbox(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.DeleteMailbox(r.PathValue("id")); err != nil {
+	id := r.PathValue("id")
+	if !s.canAccessMailboxID(r, id) {
+		writeError(w, http.StatusNotFound, errCode("mailbox_not_found", "邮箱不存在", false))
+		return
+	}
+	if err := s.store.DeleteMailbox(id); err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
@@ -611,7 +691,8 @@ func (s *Server) handleDeleteMailbox(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, ok := s.store.FindMailboxByID(id); !ok {
+	mailbox, ok := s.store.FindMailboxByID(id)
+	if !ok || !s.canAccessMailbox(r, mailbox) {
 		writeError(w, http.StatusNotFound, errCode("mailbox_not_found", "邮箱不存在", false))
 		return
 	}
@@ -633,6 +714,10 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateMessage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if !s.canAccessMailboxID(r, id) {
+		writeError(w, http.StatusNotFound, errCode("mailbox_not_found", "邮箱不存在", false))
+		return
+	}
 	var payload struct {
 		Subject    string `json:"subject"`
 		From       string `json:"from"`
@@ -780,7 +865,7 @@ func truthy(value string) bool {
 }
 
 func (s *Server) syncMailbox(ctx context.Context, mailbox Mailbox, after time.Time, keyword string) (int, error) {
-	session, ok := s.store.ICloudSession()
+	session, ok := s.store.ICloudSessionForBrowser(mailbox.BrowserKey)
 	if !ok {
 		return 0, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先手动登录并保存登录态", true)
 	}
@@ -844,11 +929,108 @@ func (s *Server) authorizedGlobalAPI(r *http.Request) bool {
 	return false
 }
 
+func requestBrowserKey(r *http.Request) string {
+	return firstNonEmpty(
+		r.Header.Get("X-Browser-Key"),
+		r.Header.Get("X-Client-Key"),
+		r.URL.Query().Get("browser_key"),
+	)
+}
+
+func scopedBrowserKey(r *http.Request, store *FileStore) string {
+	key := requestBrowserKey(r)
+	if key == "" || !store.HasBrowserKey(key) {
+		return ""
+	}
+	return key
+}
+
+func (s *Server) scopedState(r *http.Request) State {
+	if key := scopedBrowserKey(r, s.store); key != "" {
+		return s.store.SnapshotForBrowser(key)
+	}
+	return s.store.Snapshot()
+}
+
+func (s *Server) sessionForRequest(r *http.Request) (ICloudSession, bool) {
+	return s.store.ICloudSessionForBrowser(scopedBrowserKey(r, s.store))
+}
+
+func (s *Server) authorizedBrowserKey(r *http.Request) bool {
+	key := requestBrowserKey(r)
+	return key != "" && s.store.HasBrowserKey(key)
+}
+
+func (s *Server) allowsBrowserKey(r *http.Request) bool {
+	if r.Method == http.MethodGet && r.URL.Path == "/api/status" {
+		return true
+	}
+	if r.Method == http.MethodGet && r.URL.Path == "/api/runtime/export" {
+		return true
+	}
+	if r.Method == http.MethodGet && r.URL.Path == "/api/icloud/session" {
+		return true
+	}
+	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/icloud/") {
+		return true
+	}
+	if r.Method == http.MethodGet && r.URL.Path == "/api/accounts" {
+		return true
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/api/accounts" {
+		return true
+	}
+	if r.Method == http.MethodGet && r.URL.Path == "/api/mailboxes" {
+		return true
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/api/mailboxes" {
+		return true
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/mailboxes/") {
+		return true
+	}
+	return false
+}
+
+func (s *Server) canAccessMailboxID(r *http.Request, id string) bool {
+	mailbox, ok := s.store.FindMailboxByID(id)
+	return ok && s.canAccessMailbox(r, mailbox)
+}
+
+func (s *Server) canAccessMailbox(r *http.Request, mailbox Mailbox) bool {
+	browserKey := scopedBrowserKey(r, s.store)
+	if browserKey == "" {
+		return true
+	}
+	return constantTimeEqual(browserKey, mailbox.BrowserKey)
+}
+
+func (s *Server) canAccessAccountID(r *http.Request, id string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return true
+	}
+	browserKey := scopedBrowserKey(r, s.store)
+	if browserKey == "" {
+		return true
+	}
+	state := s.store.SnapshotForBrowser(browserKey)
+	for _, account := range state.Accounts {
+		if account.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) requiresAdmin(r *http.Request) bool {
 	if strings.TrimSpace(s.cfg.AdminKey) == "" {
 		return false
 	}
 	if r.URL.Path == "/" {
+		return false
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/api/browser-key" {
 		return false
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/api/v1/health" {

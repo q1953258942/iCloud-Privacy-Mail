@@ -18,15 +18,25 @@ const (
 )
 
 type State struct {
-	NextID        int            `json:"next_id"`
-	Accounts      []Account      `json:"accounts"`
-	Mailboxes     []Mailbox      `json:"mailboxes"`
-	Messages      []Message      `json:"messages"`
-	ICloudSession *ICloudSession `json:"icloud_session,omitempty"`
+	NextID         int             `json:"next_id"`
+	BrowserClients []BrowserClient `json:"browser_clients,omitempty"`
+	Accounts       []Account       `json:"accounts"`
+	Mailboxes      []Mailbox       `json:"mailboxes"`
+	Messages       []Message       `json:"messages"`
+	ICloudSession  *ICloudSession  `json:"icloud_session,omitempty"`
+	ICloudSessions []ICloudSession `json:"icloud_sessions,omitempty"`
+}
+
+type BrowserClient struct {
+	Key        string    `json:"key"`
+	Label      string    `json:"label,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	LastSeenAt time.Time `json:"last_seen_at"`
 }
 
 type Account struct {
 	ID           string    `json:"id"`
+	BrowserKey   string    `json:"browser_key,omitempty"`
 	Label        string    `json:"label"`
 	AppleID      string    `json:"apple_id"`
 	Status       string    `json:"status"`
@@ -38,6 +48,7 @@ type Account struct {
 
 type Mailbox struct {
 	ID           string    `json:"id"`
+	BrowserKey   string    `json:"browser_key,omitempty"`
 	AccountID    string    `json:"account_id"`
 	Label        string    `json:"label"`
 	Email        string    `json:"email"`
@@ -53,6 +64,7 @@ type Mailbox struct {
 
 type Message struct {
 	ID         string    `json:"id"`
+	BrowserKey string    `json:"browser_key,omitempty"`
 	MailboxID  string    `json:"mailbox_id"`
 	RemoteID   string    `json:"remote_id,omitempty"`
 	Source     string    `json:"source,omitempty"`
@@ -64,6 +76,7 @@ type Message struct {
 }
 
 type ICloudSession struct {
+	BrowserKey         string          `json:"browser_key,omitempty"`
 	SavedAt            time.Time       `json:"saved_at"`
 	AppleID            string          `json:"apple_id,omitempty"`
 	DSID               string          `json:"dsid"`
