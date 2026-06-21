@@ -276,7 +276,7 @@
       if (!row) return;
       try {
         const url = new URL(row.api_url);
-        url.searchParams.set('after', new Date(Date.now() - 5 * 60 * 1000).toISOString());
+        url.searchParams.set('keyword', 'ChatGPT');
         const res = await fetch(url.toString());
         const data = await res.json();
         log(data.success ? `验证码：${row.email} -> ${data.code}` : `未取到：${data.message || data.code}`);
@@ -289,7 +289,8 @@
       const row = lastMailboxes.find(x => x.id === id);
       log('开始同步邮件：' + (row ? row.email : id));
       const data = await api(`/api/mailboxes/${encodeURIComponent(id)}/sync?keyword=OpenAI`, {method:'POST', body:'{}'});
-      log(`同步完成：${row ? row.email : id}，新增 ${data.synced || 0} 封验证码邮件`);
+      const messages = await api(`/api/mailboxes/${encodeURIComponent(id)}/messages`);
+      log(`同步完成：${row ? row.email : id}，新增 ${data.synced || 0} 封验证码邮件，本地已有 ${(messages.messages || []).length} 封`);
       await refresh();
     }
 
