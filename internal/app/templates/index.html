@@ -117,6 +117,7 @@
     button.primary { background: linear-gradient(135deg, #35e28a, #9dffd0); color: #04130c; border-color: transparent; font-weight: 800; }
     button.danger { border-color: rgba(255, 127, 115, .46); color: #ffb0a9; background: rgba(64, 13, 9, .56); }
     button.ghost { background: transparent; }
+    button:disabled { cursor: not-allowed; opacity: .55; transform: none; }
     .notice {
       margin: 14px 18px 0;
       padding: 12px 13px;
@@ -243,10 +244,13 @@
           <div class="field-grid">
             <label>标签<input id="protoLabel" placeholder="UPI-70-13"></label>
             <label>账号 ID<input id="protoAccountId" placeholder="可留空"></label>
+            <label>总数<input id="protoCount" type="number" min="1" max="200" value="1" placeholder="总共创建多少个"></label>
+            <label>并发<input id="protoConcurrency" type="number" min="1" max="20" value="1" placeholder="同时创建几个"></label>
             <label class="full">备注<input id="protoNote" placeholder="选填"></label>
           </div>
           <div class="toolbar">
-            <button class="primary" onclick="createICloudMailbox()">创建隐私邮箱</button>
+            <button id="createICloudButton" class="primary" onclick="createICloudMailbox()">开始创建</button>
+            <span id="protoBatchProgress" class="muted">单次或批量创建，建议先小并发测试。</span>
           </div>
         </section>
 
@@ -353,6 +357,27 @@
 
     function log(text) {
       $('log').textContent = new Date().toLocaleTimeString() + ' ' + text + '\n' + $('log').textContent;
+    }
+
+    function boundedInt(id, fallback, min, max) {
+      const el = $(id);
+      const parsed = Number.parseInt(el ? el.value : '', 10);
+      const value = Number.isFinite(parsed) ? parsed : fallback;
+      const normalized = Math.max(min, Math.min(max, value));
+      if (el) el.value = String(normalized);
+      return normalized;
+    }
+
+    function batchLabel(base, index, total) {
+      base = String(base || '').trim();
+      if (total <= 1) return base;
+      if (!base) {
+        const now = new Date();
+        const pad = (value) => String(value).padStart(2, '0');
+        base = `UPI-${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+      }
+      const width = Math.max(2, String(total).length);
+      return `${base}-${String(index).padStart(width, '0')}`;
     }
 
     function currentAdminKey() {
@@ -520,14 +545,58 @@
     }
 
     async function createICloudMailbox() {
-      const data = await api('/api/icloud/mailboxes/create', {method:'POST', body: JSON.stringify({
-        account_id: $('protoAccountId').value.trim(),
-        label: $('protoLabel').value.trim(),
-        note: $('protoNote').value.trim()
-      })});
-      $('msgMailboxId').value = data.mailbox.id;
-      log('协议创建邮箱成功：' + data.mailbox.email);
-      await refresh();
+      const button = $('createICloudButton');
+      const progress = $('protoBatchProgress');
+      const accountID = $('protoAccountId').value.trim();
+      const baseLabel = $('protoLabel').value.trim();
+      const note = $('protoNote').value.trim();
+      const count = boundedInt('protoCount', 1, 1, 200);
+      const concurrency = Math.min(boundedInt('protoConcurrency', 1, 1, 20), count);
+      $('protoConcurrency').value = String(concurrency);
+
+      let nextIndex = 1;
+      let success = 0;
+      let failed = 0;
+      let lastMailbox = null;
+
+      button.disabled = true;
+      progress.textContent = `创建中：0/${count}，并发 ${concurrency}`;
+      log(`开始协议创建邮箱：总数=${count}，并发=${concurrency}`);
+
+      async function createOne(index) {
+        const data = await api('/api/icloud/mailboxes/create', {method:'POST', body: JSON.stringify({
+          account_id: accountID,
+          label: batchLabel(baseLabel, index, count),
+          note
+        })});
+        return data.mailbox;
+      }
+
+      async function worker(workerNo) {
+        while (nextIndex <= count) {
+          const index = nextIndex++;
+          try {
+            const mailbox = await createOne(index);
+            lastMailbox = mailbox;
+            success++;
+            log(`创建成功 ${index}/${count}：${mailbox.email}`);
+          } catch (err) {
+            failed++;
+            log(`创建失败 ${index}/${count}：${err.message}`);
+          }
+          progress.textContent = `创建中：${success + failed}/${count}，成功 ${success}，失败 ${failed}，worker ${workerNo}`;
+        }
+      }
+
+      try {
+        await Promise.all(Array.from({length: concurrency}, (_, index) => worker(index + 1)));
+        if (lastMailbox) $('msgMailboxId').value = lastMailbox.id;
+        progress.textContent = `创建完成：成功 ${success}/${count}，失败 ${failed}`;
+        log(`批量创建完成：成功 ${success}/${count}，失败 ${failed}`);
+      } finally {
+        button.disabled = false;
+        await refresh();
+      }
     }
 
     async function verifyMailbox(id) {
