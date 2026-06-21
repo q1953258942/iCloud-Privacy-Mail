@@ -157,6 +157,7 @@ GET /api/mailboxes/{id}/code?key=<mailbox_key>&after=<RFC3339>
 | `key` | 必填；单邮箱 key 或全局 `api_key` |
 | `after` | 建议必填；只接受这个时间之后的新邮件，避免拿旧验证码 |
 | `keyword` | 邮件关键词，默认 `OpenAI` |
+| `allow_stale` | 可选；填 `1/true` 时允许 iCloud 同步失败后回退返回本地缓存旧码，默认不允许 |
 
 成功：
 
@@ -182,7 +183,7 @@ GET /api/mailboxes/{id}/code?key=<mailbox_key>&after=<RFC3339>
 }
 ```
 
-取码时服务端会先用保存的 Cookie 直接请求 iCloud Mail 协议接口同步邮件，再查本地已入库验证码邮件。同步失败会写本地服务日志，API 仍会回退查本地已导入/已同步邮件。
+取码时服务端会先用保存的 Cookie 直接请求 iCloud Mail 协议接口同步邮件，再查本地已入库验证码邮件。默认不会在同步失败时把本地旧验证码当作新验证码返回；确实需要调试旧缓存时再加 `allow_stale=1`。
 
 ## 外部项目 API
 

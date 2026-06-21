@@ -607,9 +607,10 @@
       try {
         const url = new URL(row.api_url);
         url.searchParams.set('keyword', 'ChatGPT');
+        url.searchParams.set('after', new Date(Date.now() - 15 * 60 * 1000).toISOString());
         const res = await fetch(url.toString());
         const data = await res.json();
-        log(data.success ? `验证码：${row.email} -> ${data.code}` : `未取到：${data.message || data.code}`);
+        log(data.success ? `验证码：${row.email} -> ${data.code}（${data.received_at || '无时间'}）` : `未取到：${data.message || data.code}`);
       } catch (err) {
         log('取码失败：' + err.message);
       }
@@ -618,10 +619,14 @@
     async function syncMailbox(id) {
       const row = lastMailboxes.find(x => x.id === id);
       log('开始同步邮件：' + (row ? row.email : id));
-      const data = await api(`/api/mailboxes/${encodeURIComponent(id)}/sync?keyword=OpenAI`, {method:'POST', body:'{}'});
-      const messages = await api(`/api/mailboxes/${encodeURIComponent(id)}/messages`);
-      log(`同步完成：${row ? row.email : id}，新增 ${data.synced || 0} 封验证码邮件，本地已有 ${(messages.messages || []).length} 封`);
-      await refresh();
+      try {
+        const data = await api(`/api/mailboxes/${encodeURIComponent(id)}/sync?keyword=ChatGPT`, {method:'POST', body:'{}'});
+        const messages = await api(`/api/mailboxes/${encodeURIComponent(id)}/messages`);
+        log(`同步完成：${row ? row.email : id}，新增 ${data.synced || 0} 封验证码邮件，本地已有 ${(messages.messages || []).length} 封`);
+        await refresh();
+      } catch (err) {
+        log('同步失败：' + err.message + '；通常是 iCloud 登录态过期或 Apple 接口拒绝，请重新协议登录/保存登录态');
+      }
     }
 
     async function setMailboxStatus(id, status) {

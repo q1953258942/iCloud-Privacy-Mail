@@ -193,9 +193,6 @@ func (c *ICloudClient) SyncMailboxMessages(ctx context.Context, session ICloudSe
 			return out, err
 		}
 		for _, thread := range threads {
-			if !after.IsZero() && !thread.ReceivedAt.IsZero() && thread.ReceivedAt.Before(after.Add(-10*time.Second)) {
-				continue
-			}
 			text := thread.Subject + "\n" + thread.Preview
 			if keyword != "" && !containsFold(text, keyword) && extractOTP(text) == "" {
 				continue

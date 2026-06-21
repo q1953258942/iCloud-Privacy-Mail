@@ -577,16 +577,56 @@ func (s *Server) writeMailboxCode(w http.ResponseWriter, r *http.Request, mailbo
 	if keyword == "" {
 		keyword = "OpenAI"
 	}
+	allowStale := truthy(r.URL.Query().Get("allow_stale"))
+	var syncErr error
 	if _, err := s.syncMailbox(r.Context(), mailbox, after, keyword); err != nil {
+		syncErr = err
 		s.logger.Warn("icloud sync failed", "mailbox_id", mailbox.ID, "err", err)
 	}
 
-	messages := s.store.MessagesForMailbox(mailbox.ID)
+	canUseLocalCache := syncErr == nil || allowStale || !after.IsZero()
+	if canUseLocalCache {
+		msg, code, ok := latestMailboxCode(s.store.MessagesForMailbox(mailbox.ID), after, keyword)
+		if !ok && syncErr != nil && allowStale && !after.IsZero() {
+			msg, code, ok = latestMailboxCode(s.store.MessagesForMailbox(mailbox.ID), time.Time{}, keyword)
+		}
+		if ok {
+			payload := map[string]any{
+				"success":     true,
+				"email":       mailbox.Email,
+				"code":        code,
+				"subject":     msg.Subject,
+				"received_at": formatTime(msg.ReceivedAt),
+				"message_id":  msg.ID,
+			}
+			if syncErr != nil {
+				payload["stale_cache"] = true
+				payload["sync_error"] = "iCloud 同步失败，当前验证码来自本地缓存"
+			}
+			writeJSON(w, http.StatusOK, payload)
+			return
+		}
+	}
+	if syncErr != nil && !allowStale {
+		writeError(w, http.StatusBadGateway, errCode("icloud_sync_failed", "同步 iCloud 邮件失败，已拒绝返回本地旧验证码；请重新登录 iCloud 或稍后重试", true))
+		return
+	}
+	writeError(w, http.StatusOK, errCode("no_code", "暂未收到验证码", true))
+}
+
+func latestMailboxCode(messages []Message, after time.Time, keyword string) (Message, string, bool) {
+	keyword = strings.TrimSpace(keyword)
+	if keyword == "" {
+		keyword = "OpenAI"
+	}
 	sort.SliceStable(messages, func(i, j int) bool {
-		return messages[i].ReceivedAt.After(messages[j].ReceivedAt)
+		left := firstNonZeroTime(messages[i].ReceivedAt, messages[i].CreatedAt)
+		right := firstNonZeroTime(messages[j].ReceivedAt, messages[j].CreatedAt)
+		return left.After(right)
 	})
 	for _, msg := range messages {
-		if !after.IsZero() && msg.ReceivedAt.Before(after.Add(-10*time.Second)) {
+		msgTime := firstNonZeroTime(msg.ReceivedAt, msg.CreatedAt)
+		if !after.IsZero() && msgTime.Before(after.Add(-10*time.Second)) {
 			continue
 		}
 		text := msg.Subject + "\n" + msg.Body
@@ -597,17 +637,18 @@ func (s *Server) writeMailboxCode(w http.ResponseWriter, r *http.Request, mailbo
 		if code == "" {
 			continue
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"success":     true,
-			"email":       mailbox.Email,
-			"code":        code,
-			"subject":     msg.Subject,
-			"received_at": formatTime(msg.ReceivedAt),
-			"message_id":  msg.ID,
-		})
-		return
+		return msg, code, true
 	}
-	writeError(w, http.StatusOK, errCode("no_code", "暂未收到验证码", true))
+	return Message{}, "", false
+}
+
+func truthy(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) syncMailbox(ctx context.Context, mailbox Mailbox, after time.Time, keyword string) (int, error) {
@@ -615,7 +656,7 @@ func (s *Server) syncMailbox(ctx context.Context, mailbox Mailbox, after time.Ti
 	if !ok {
 		return 0, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先手动登录并保存登录态", true)
 	}
-	messages, err := NewICloudClient().SyncMailboxMessages(ctx, session, mailbox, after, keyword, 20)
+	messages, err := NewICloudClient().SyncMailboxMessages(ctx, session, mailbox, after, keyword, 50)
 	if err != nil {
 		return 0, err
 	}

@@ -111,6 +111,42 @@ func TestUpsertMessageDeduplicatesRemoteID(t *testing.T) {
 	}
 }
 
+func TestLatestMailboxCodeSelectsNewestAndHonorsAfter(t *testing.T) {
+	oldTime := time.Date(2026, 6, 21, 21, 36, 50, 0, time.FixedZone("CST", 8*3600))
+	newTime := oldTime.Add(30 * time.Minute)
+	messages := []Message{
+		{ID: "old", Subject: "Your temporary ChatGPT verification code", Body: "Enter this temporary verification code to continue: 733849", ReceivedAt: oldTime},
+		{ID: "new", Subject: "Your temporary ChatGPT verification code", Body: "Enter this temporary verification code to continue: 246810", ReceivedAt: newTime},
+	}
+
+	msg, code, ok := latestMailboxCode(messages, time.Time{}, "ChatGPT")
+	if !ok || msg.ID != "new" || code != "246810" {
+		t.Fatalf("latestMailboxCode() msg=%s code=%q ok=%v, want new 246810 true", msg.ID, code, ok)
+	}
+
+	msg, code, ok = latestMailboxCode(messages, newTime.Add(-time.Minute), "ChatGPT")
+	if !ok || msg.ID != "new" || code != "246810" {
+		t.Fatalf("latestMailboxCode(after) msg=%s code=%q ok=%v, want new 246810 true", msg.ID, code, ok)
+	}
+
+	_, _, ok = latestMailboxCode(messages, newTime.Add(time.Minute), "ChatGPT")
+	if ok {
+		t.Fatalf("latestMailboxCode(after future) ok=true, want false")
+	}
+}
+
+func TestLatestMailboxCodeUsesCreatedAtWhenReceivedAtMissing(t *testing.T) {
+	messages := []Message{
+		{ID: "old", Subject: "ChatGPT code", Body: "code 111111", CreatedAt: time.Date(2026, 6, 21, 20, 0, 0, 0, time.UTC)},
+		{ID: "new", Subject: "ChatGPT code", Body: "code 222222", CreatedAt: time.Date(2026, 6, 21, 20, 5, 0, 0, time.UTC)},
+	}
+
+	msg, code, ok := latestMailboxCode(messages, time.Time{}, "ChatGPT")
+	if !ok || msg.ID != "new" || code != "222222" {
+		t.Fatalf("latestMailboxCode() msg=%s code=%q ok=%v, want new 222222 true", msg.ID, code, ok)
+	}
+}
+
 func TestAdminKeyProtectsManagementAPI(t *testing.T) {
 	store := newTestStore(t)
 	handler := NewServer(Config{AdminKey: "admin-secret"}, store, discardLogger())
