@@ -105,6 +105,8 @@
       background: #fff;
     }
     textarea { min-height: 88px; resize: vertical; }
+    input[type="checkbox"] { width: auto; min-width: 0; }
+    label.checkline { flex-direction: row; align-items: center; justify-content: flex-start; padding: 11px 12px; }
     button {
       background: rgba(255, 255, 255, .9);
       color: var(--text);
@@ -224,6 +226,12 @@
           <div class="toolbar">
             <button class="primary" onclick="startProtocolLogin()">协议登录</button>
             <button onclick="submitProtocol2FA()">提交 2FA</button>
+            <button id="sessionCheckButton" onclick="checkICloudSession()">检测登录态</button>
+          </div>
+          <div class="field-grid">
+            <label>自动检测间隔（分钟）<input id="sessionCheckMinutes" type="number" min="1" max="120" value="3" onchange="saveSessionCheckSettings()" placeholder="3"></label>
+            <label class="checkline"><input id="autoSessionCheck" type="checkbox" onchange="saveSessionCheckSettings()"> 开启自动检测</label>
+            <div class="full muted" id="sessionCheckStatus">自动检测未开启。</div>
           </div>
           <details class="inline-details">
             <summary>浏览器兜底 / 高级连接参数</summary>
@@ -336,8 +344,12 @@
   <script>
     const $ = (id) => document.getElementById(id);
     const adminKeyStorage = 'ipm_admin_key';
+    const sessionCheckEnabledStorage = 'ipm_session_check_enabled';
+    const sessionCheckMinutesStorage = 'ipm_session_check_minutes';
     let lastMailboxes = [];
     let protocolPendingID = '';
+    let sessionCheckTimer = null;
+    let sessionCheckInFlight = false;
 
     async function api(path, options = {}) {
       const headers = {'content-type': 'application/json', ...(options.headers || {})};
@@ -404,6 +416,68 @@
       log('Admin Key 已清空');
     }
 
+    function initSessionCheckSettings() {
+      const savedMinutes = localStorage.getItem(sessionCheckMinutesStorage);
+      if (savedMinutes && $('sessionCheckMinutes')) {
+        $('sessionCheckMinutes').value = savedMinutes;
+      }
+      if ($('autoSessionCheck')) {
+        $('autoSessionCheck').checked = localStorage.getItem(sessionCheckEnabledStorage) === '1';
+      }
+      scheduleSessionCheck(false);
+    }
+
+    function saveSessionCheckSettings() {
+      const enabled = !!($('autoSessionCheck') && $('autoSessionCheck').checked);
+      const minutes = boundedInt('sessionCheckMinutes', 3, 1, 120);
+      localStorage.setItem(sessionCheckMinutesStorage, String(minutes));
+      localStorage.setItem(sessionCheckEnabledStorage, enabled ? '1' : '0');
+      scheduleSessionCheck(true);
+    }
+
+    function scheduleSessionCheck(runNow) {
+      if (sessionCheckTimer) {
+        clearInterval(sessionCheckTimer);
+        sessionCheckTimer = null;
+      }
+      const enabled = !!($('autoSessionCheck') && $('autoSessionCheck').checked);
+      const minutes = boundedInt('sessionCheckMinutes', 3, 1, 120);
+      if (!$('sessionCheckStatus')) return;
+      if (!enabled) {
+        $('sessionCheckStatus').textContent = '自动检测未开启。需要时可手动点击“检测登录态”。';
+        return;
+      }
+      $('sessionCheckStatus').textContent = `自动检测已开启：每 ${minutes} 分钟检测一次。`;
+      sessionCheckTimer = setInterval(() => {
+        checkICloudSession({auto: true}).catch(err => log('自动检测异常：' + err.message));
+      }, minutes * 60 * 1000);
+      if (runNow) {
+        checkICloudSession({auto: true}).catch(err => log('自动检测异常：' + err.message));
+      }
+    }
+
+    async function checkICloudSession() {
+      if (sessionCheckInFlight) return;
+      sessionCheckInFlight = true;
+      const button = $('sessionCheckButton');
+      if (button) button.disabled = true;
+      if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = '正在检测 iCloud Mail 登录态...';
+      try {
+        const data = await api('/api/icloud/session/check', {method:'POST', body:'{}'});
+        renderICloudSession(data.session);
+        const checkedAt = data.checked_at || (data.session && data.session.last_checked_at) || '-';
+        if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = `最近检测正常：${checkedAt}`;
+        log('登录态检测正常：iCloud Mail 可同步');
+      } catch (err) {
+        if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = '最近检测失败；请重新协议登录或保存登录态。';
+        log('登录态检测失败：' + err.message + '；请重新协议登录/保存登录态');
+        await refresh().catch(() => {});
+      } finally {
+        if (button) button.disabled = false;
+        sessionCheckInFlight = false;
+      }
+    }
+
     async function refresh() {
       const [status, boxes] = await Promise.all([api('/api/status'), api('/api/mailboxes')]);
       const sessionSaved = !!(status.icloud_session && status.icloud_session.saved);
@@ -465,10 +539,15 @@
         session.can_create_hme ? '可创建隐私邮箱' : '不可创建隐私邮箱',
         `Cookie ${session.cookie_count || 0}`
       ].join(' / ');
+      const checkLine = session.last_checked_at
+        ? `最近检测：${session.last_check_ok ? '正常' : '失败'} / ${session.last_checked_at}`
+        : '最近检测：未检测';
       $('icloudSessionInfo').textContent =
         `已保存：${session.apple_id || '-'}，DSID=${session.dsid_mask || '-'}\n` +
         `${flags}\n` +
         `服务地址已记录：HME / Mail Gateway / Mail\n` +
+        `${checkLine}\n` +
+        `状态：${session.last_status_message || '-'}\n` +
         `保存时间：${session.saved_at || '-'}`;
     }
 
@@ -680,6 +759,7 @@
     }
 
     $('adminKey').value = localStorage.getItem(adminKeyStorage) || '';
+    initSessionCheckSettings();
     refresh().catch(err => log('刷新失败：' + err.message));
   </script>
 </body>

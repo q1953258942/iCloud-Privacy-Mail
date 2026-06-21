@@ -58,6 +58,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/icloud/protocol-login/2fa", s.handleSubmitICloudProtocol2FA)
 	s.mux.HandleFunc("POST /api/icloud/browser/open", s.handleOpenICloudBrowser)
 	s.mux.HandleFunc("POST /api/icloud/session/save", s.handleSaveICloudSession)
+	s.mux.HandleFunc("POST /api/icloud/session/check", s.handleCheckICloudSession)
 	s.mux.HandleFunc("POST /api/icloud/mailboxes/create", s.handleCreateICloudMailbox)
 	s.mux.HandleFunc("GET /api/accounts", s.handleListAccounts)
 	s.mux.HandleFunc("POST /api/accounts", s.handleCreateAccount)
@@ -160,6 +161,42 @@ func (s *Server) handleICloudSession(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "session": publicSession(&session)})
+}
+
+func (s *Server) handleCheckICloudSession(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.store.ICloudSession()
+	if !ok {
+		writeError(w, http.StatusBadRequest, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先协议登录或手动保存登录态", true))
+		return
+	}
+
+	checkedAt := time.Now()
+	if err := NewICloudClient().CheckMailSession(r.Context(), session); err != nil {
+		session.LastCheckedAt = checkedAt
+		session.LastCheckOK = false
+		session.LastStatusMessage = "最近检测失败：" + formatTime(checkedAt) + "；iCloud Mail 不可用，请重新协议登录/保存登录态"
+		if saveErr := s.store.SaveICloudSession(session); saveErr != nil {
+			writeError(w, http.StatusInternalServerError, saveErr)
+			return
+		}
+		s.logger.Warn("iCloud session check failed", "err", err)
+		writeError(w, http.StatusBadGateway, errCode("icloud_session_check_failed", session.LastStatusMessage, true))
+		return
+	}
+
+	session.LastCheckedAt = checkedAt
+	session.LastCheckOK = true
+	session.LastStatusMessage = "最近检测正常：" + formatTime(checkedAt) + "；iCloud Mail 可同步"
+	if err := s.store.SaveICloudSession(session); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":    true,
+		"checked_at": formatTime(checkedAt),
+		"message":    session.LastStatusMessage,
+		"session":    publicSession(&session),
+	})
 }
 
 func (s *Server) handleStartICloudProtocolLogin(w http.ResponseWriter, r *http.Request) {
@@ -795,6 +832,10 @@ func publicSession(session *ICloudSession) publicICloudSession {
 			ProviderConfigured: false,
 		}
 	}
+	message := strings.TrimSpace(session.LastStatusMessage)
+	if message == "" {
+		message = "登录态已保存；Cookie 原文只写入本地 data/state.json，不会返回前端"
+	}
 	return publicICloudSession{
 		Saved:              true,
 		SavedAt:            formatTime(session.SavedAt),
@@ -811,7 +852,9 @@ func publicSession(session *ICloudSession) publicICloudSession {
 		CookieCount:        len(session.Cookies),
 		ProviderConfigured: session.IsICloudPlus && session.CanCreateHME && len(session.Cookies) > 0,
 		NeedsManualLogin:   len(session.Cookies) == 0,
-		LastStatusMessage:  "登录态已保存；Cookie 原文只写入本地 data/state.json，不会返回前端",
+		LastCheckedAt:      formatTime(session.LastCheckedAt),
+		LastCheckOK:        session.LastCheckOK,
+		LastStatusMessage:  message,
 	}
 }
 

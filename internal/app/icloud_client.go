@@ -210,6 +210,17 @@ func (c *ICloudClient) SyncMailboxMessages(ctx context.Context, session ICloudSe
 	return out, nil
 }
 
+func (c *ICloudClient) CheckMailSession(ctx context.Context, session ICloudSession) error {
+	if strings.TrimSpace(session.DSID) == "" || len(session.Cookies) == 0 {
+		return errCode("icloud_session_missing", "未保存 iCloud 登录态，请先协议登录或手动保存登录态", true)
+	}
+	if _, err := mailGatewayBaseURL(session); err != nil {
+		return err
+	}
+	_, err := c.mailFolders(ctx, session)
+	return err
+}
+
 type mailFolder struct {
 	ID           string `json:"identifier"`
 	Name         string `json:"name"`

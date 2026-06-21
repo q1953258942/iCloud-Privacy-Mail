@@ -78,6 +78,9 @@ type ICloudSession struct {
 	CanCreateHME       bool            `json:"can_create_hme"`
 	Cookies            []SessionCookie `json:"cookies"`
 	Note               string          `json:"note,omitempty"`
+	LastCheckedAt      time.Time       `json:"last_checked_at,omitempty"`
+	LastCheckOK        bool            `json:"last_check_ok,omitempty"`
+	LastStatusMessage  string          `json:"last_status_message,omitempty"`
 }
 
 type SessionCookie struct {
@@ -144,6 +147,8 @@ type publicICloudSession struct {
 	CookieCount        int    `json:"cookie_count"`
 	ProviderConfigured bool   `json:"provider_configured"`
 	NeedsManualLogin   bool   `json:"needs_manual_login"`
+	LastCheckedAt      string `json:"last_checked_at,omitempty"`
+	LastCheckOK        bool   `json:"last_check_ok"`
 	LastStatusMessage  string `json:"last_status_message,omitempty"`
 }
 

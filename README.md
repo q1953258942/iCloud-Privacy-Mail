@@ -11,6 +11,7 @@
 - 支持通过比特浏览器手动登录 iCloud 后保存本地登录态。
 - 支持协议调用 iCloud Hide My Email `generate + reserve` 创建隐私邮箱。
 - 支持纯 Go 协议同步 iCloud Mail `mccgateway` 邮件服务并提取验证码，取码时不依赖浏览器页面执行脚本。
+- 支持手动检测 iCloud Mail 登录态，并可在面板设置每隔几分钟自动检测一次。
 - 支持为每个隐私邮箱生成独立 API 地址。
 - 支持导入邮件测试数据。
 - 支持从邮件标题/正文提取 6 位验证码。
@@ -88,6 +89,7 @@ Copy-Item .\config.example.json .\config.json
 7. 面板支持填写 `总数` 和 `并发` 批量创建；总数大于 1 时会给标签自动追加序号，例如 `UPI-70-13-01`。建议先用 1-3 并发测试，避免 iCloud 临时限流。
 8. 创建成功的邮箱会自动写入本地邮箱列表，并生成独立 API 地址。
 9. 收到验证码邮件后，取码 API 会用 Go 后端纯协议同步 iCloud 邮件并提取 6 位验证码；也可以在面板点击 `同步邮件` 手动触发。
+10. 面板 `检测登录态` 会请求 iCloud Mail 文件夹列表确认登录态是否还能同步；勾选 `开启自动检测` 后，会按填写的分钟间隔循环检测，失败时日志会提示重新协议登录或保存登录态。
 
 ### 方式二：浏览器兜底登录 + 协议创建隐私邮箱
 
@@ -130,11 +132,12 @@ POST /api/icloud/protocol-login/start
 POST /api/icloud/protocol-login/2fa
 POST /api/icloud/browser/open
 POST /api/icloud/session/save
+POST /api/icloud/session/check
 GET  /api/icloud/session
 POST /api/icloud/mailboxes/create
 ```
 
-登录态过期、iCloud 权限变化或 Apple 要求重新验证时，优先重新走协议登录；如果 Apple 风控拦截，再用浏览器兜底登录保存 Cookie。
+登录态过期、iCloud 权限变化或 Apple 要求重新验证时，`POST /api/icloud/session/check` 会返回失败，并把最近检测结果写入本地状态；优先重新走协议登录，如果 Apple 风控拦截，再用浏览器兜底登录保存 Cookie。
 
 ## 对外取码 API
 

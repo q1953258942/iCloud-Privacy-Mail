@@ -87,6 +87,31 @@ func TestMailGatewayBaseURLFallback(t *testing.T) {
 	}
 }
 
+func TestPublicSessionIncludesLastCheckStatus(t *testing.T) {
+	checkedAt := time.Date(2026, 6, 21, 23, 0, 0, 0, time.UTC)
+	session := ICloudSession{
+		SavedAt:           checkedAt.Add(-time.Hour),
+		AppleID:           "user@example.com",
+		DSID:              "1234567890",
+		IsICloudPlus:      true,
+		CanCreateHME:      true,
+		Cookies:           []SessionCookie{{Name: "session", Value: "x", Domain: ".icloud.com.cn", Path: "/"}},
+		LastCheckedAt:     checkedAt,
+		LastCheckOK:       false,
+		LastStatusMessage: "最近检测失败：请重新登录",
+	}
+	got := publicSession(&session)
+	if got.LastCheckedAt != formatTime(checkedAt) {
+		t.Fatalf("LastCheckedAt = %q, want %q", got.LastCheckedAt, formatTime(checkedAt))
+	}
+	if got.LastCheckOK {
+		t.Fatalf("LastCheckOK = true, want false")
+	}
+	if got.LastStatusMessage != session.LastStatusMessage {
+		t.Fatalf("LastStatusMessage = %q, want %q", got.LastStatusMessage, session.LastStatusMessage)
+	}
+}
+
 func TestUpsertMessageDeduplicatesRemoteID(t *testing.T) {
 	store := newTestStore(t)
 	mailbox, err := store.AddMailbox("", "UPI-1", "alias@icloud.com")
