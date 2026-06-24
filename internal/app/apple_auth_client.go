@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -59,6 +60,18 @@ type appleAuthStartResult struct {
 	Message   string
 	AppleID   string
 	ExpiresAt time.Time
+}
+
+type appleDomainRedirectError struct {
+	DomainToUse string
+	Host        string
+}
+
+func (e appleDomainRedirectError) Error() string {
+	if e.Host != "" {
+		return "Apple 要求切换 iCloud 域：" + e.Host
+	}
+	return "Apple 要求切换 iCloud 域：" + e.DomainToUse
 }
 
 type appleAccountInfo struct {
@@ -145,12 +158,29 @@ func (c *AppleAuthClient) StartLogin(ctx context.Context, appleID, password, def
 	if appleID == "" || strings.TrimSpace(password) == "" {
 		return appleAuthStartResult{}, errCode("apple_credentials_missing", "缺少 Apple ID 或密码", false)
 	}
+	result, err := c.startLoginOnHost(ctx, appleID, password, defaultHost, clientID, pendingStore)
+	if err == nil {
+		return result, nil
+	}
+	var redirect appleDomainRedirectError
+	if !errors.As(err, &redirect) || redirect.Host == "" {
+		return appleAuthStartResult{}, err
+	}
+	currentHost := appleAuthEndpointsForHost(defaultHost).Host
+	nextHost := appleAuthEndpointsForHost(redirect.Host).Host
+	if currentHost == nextHost {
+		return appleAuthStartResult{}, err
+	}
+	return c.startLoginOnHost(ctx, appleID, password, nextHost, clientID, pendingStore)
+}
+
+func (c *AppleAuthClient) startLoginOnHost(ctx context.Context, appleID, password, host, clientID string, pendingStore *appleAuthPendingStore) (appleAuthStartResult, error) {
 	frameID, err := randomUUID()
 	if err != nil {
 		return appleAuthStartResult{}, err
 	}
 	session := &appleAuthSession{
-		Endpoints: appleAuthEndpointsForHost(defaultHost),
+		Endpoints: appleAuthEndpointsForHost(host),
 		AppleID:   appleID,
 		ClientID:  firstNonEmpty(clientID, defaultAppleOAuthClientID),
 		FrameID:   strings.ToLower(frameID),
@@ -171,6 +201,10 @@ func (c *AppleAuthClient) StartLogin(ctx context.Context, appleID, password, def
 	if needs2FA {
 		message := "已触发 Apple 2FA，请在受信任设备允许后输入 6 位验证码"
 		if err := c.requestTrustedDeviceCode(ctx, session); err != nil {
+			var redirect appleDomainRedirectError
+			if errors.As(err, &redirect) {
+				return appleAuthStartResult{}, err
+			}
 			message = "Apple 已要求 2FA；自动触发验证码未确认，请查看受信任设备后输入验证码"
 		}
 		pending, err := pendingStore.put(session)
@@ -188,6 +222,10 @@ func (c *AppleAuthClient) StartLogin(ctx context.Context, appleID, password, def
 
 	icloudSession, err := c.authWithTokenAndValidate(ctx, session)
 	if err != nil {
+		var redirect appleDomainRedirectError
+		if errors.As(err, &redirect) {
+			return appleAuthStartResult{}, err
+		}
 		pending, putErr := pendingStore.put(session)
 		if putErr != nil {
 			return appleAuthStartResult{}, putErr
@@ -214,6 +252,20 @@ func (c *AppleAuthClient) Submit2FA(ctx context.Context, pending appleAuthPendin
 		return ICloudSession{}, errCode("invalid_2fa_code", "2FA 验证码必须是 6 位", false)
 	}
 	session := pending.Session
+	for attempt := 0; attempt < 2; attempt++ {
+		icloudSession, err := c.submit2FAWithSession(ctx, session, code)
+		if err == nil {
+			return icloudSession, nil
+		}
+		var redirect appleDomainRedirectError
+		if !errors.As(err, &redirect) || !session.switchHost(redirect.Host) {
+			return ICloudSession{}, err
+		}
+	}
+	return ICloudSession{}, errCode("apple_domain_switch_failed", "Apple 登录域切换后仍未完成 2FA，请重新发起协议登录", true)
+}
+
+func (c *AppleAuthClient) submit2FAWithSession(ctx context.Context, session *appleAuthSession, code string) (ICloudSession, error) {
 	if err := c.validateTrustedDeviceCode(ctx, session, code); err != nil {
 		return ICloudSession{}, err
 	}
@@ -239,6 +291,38 @@ func appleAuthEndpointsForHost(host string) appleAuthEndpoints {
 		Auth:  "https://idmsa.apple.com/appleauth/auth",
 		Host:  "www.icloud.com",
 	}
+}
+
+func appleDomainToHost(domain string) string {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	domain = strings.TrimPrefix(domain, "https://")
+	domain = strings.TrimPrefix(domain, "http://")
+	domain = strings.TrimPrefix(domain, "www.")
+	domain = strings.TrimSuffix(domain, "/")
+	if strings.Contains(domain, "icloud.com.cn") {
+		return "www.icloud.com.cn"
+	}
+	if strings.Contains(domain, "icloud.com") {
+		return "www.icloud.com"
+	}
+	return ""
+}
+
+func parseAppleDomainRedirect(status int, data []byte) (appleDomainRedirectError, bool) {
+	if status < 300 || status >= 400 {
+		return appleDomainRedirectError{}, false
+	}
+	var payload struct {
+		DomainToUse string `json:"domainToUse"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(data), &payload); err != nil {
+		return appleDomainRedirectError{}, false
+	}
+	host := appleDomainToHost(payload.DomainToUse)
+	if host == "" {
+		return appleDomainRedirectError{}, false
+	}
+	return appleDomainRedirectError{DomainToUse: payload.DomainToUse, Host: host}, true
 }
 
 func (c *AppleAuthClient) authStart(ctx context.Context, session *appleAuthSession) error {
@@ -323,6 +407,10 @@ func (c *AppleAuthClient) validateTrustedDeviceCode(ctx context.Context, session
 	body := map[string]any{"securityCode": map[string]string{"code": code}}
 	_, _, err := c.do(ctx, session, http.MethodPost, session.Endpoints.Auth+"/verify/trusteddevice/securitycode", session.authHeaders(), body, nil, false)
 	if err != nil {
+		var redirect appleDomainRedirectError
+		if errors.As(err, &redirect) {
+			return err
+		}
 		return errCode("apple_2fa_failed", "Apple 2FA 验证失败："+err.Error(), true)
 	}
 	return nil
@@ -406,6 +494,9 @@ func (c *AppleAuthClient) do(ctx context.Context, session *appleAuthSession, met
 	if err != nil {
 		return resp.StatusCode, nil, err
 	}
+	if redirect, ok := parseAppleDomainRedirect(resp.StatusCode, data); ok {
+		return resp.StatusCode, data, redirect
+	}
 	if resp.StatusCode == http.StatusForbidden {
 		return resp.StatusCode, nil, errCode("apple_login_forbidden", "Apple ID 或密码错误，或当前账号被限制登录", true)
 	}
@@ -443,6 +534,15 @@ func (s *appleAuthSession) extract(resp *http.Response) {
 	if v := resp.Header.Get("X-Apple-Auth-Attributes"); v != "" {
 		s.AuthAttributes = v
 	}
+}
+
+func (s *appleAuthSession) switchHost(host string) bool {
+	next := appleAuthEndpointsForHost(host)
+	if next.Host == "" || next.Host == s.Endpoints.Host {
+		return false
+	}
+	s.Endpoints = next
+	return true
 }
 
 func (s *appleAuthSession) mergeCookies(requestURL *url.URL, cookies []*http.Cookie) {

@@ -38,6 +38,50 @@ func TestExtractOTP(t *testing.T) {
 	}
 }
 
+func TestAppleDomainRedirectMapsDomainToHost(t *testing.T) {
+	tests := []struct {
+		domain string
+		want   string
+	}{
+		{domain: "iCloud.com", want: "www.icloud.com"},
+		{domain: "www.icloud.com", want: "www.icloud.com"},
+		{domain: "https://www.icloud.com.cn/", want: "www.icloud.com.cn"},
+		{domain: "example.com", want: ""},
+	}
+	for _, tt := range tests {
+		if got := appleDomainToHost(tt.domain); got != tt.want {
+			t.Fatalf("appleDomainToHost(%q) = %q, want %q", tt.domain, got, tt.want)
+		}
+	}
+}
+
+func TestParseAppleDomainRedirect(t *testing.T) {
+	redirect, ok := parseAppleDomainRedirect(http.StatusFound, []byte(`{"domainToUse":"iCloud.com"}`))
+	if !ok {
+		t.Fatal("parseAppleDomainRedirect did not detect redirect")
+	}
+	if redirect.Host != "www.icloud.com" || redirect.DomainToUse != "iCloud.com" {
+		t.Fatalf("redirect = %+v, want www.icloud.com", redirect)
+	}
+
+	if _, ok := parseAppleDomainRedirect(http.StatusOK, []byte(`{"domainToUse":"iCloud.com"}`)); ok {
+		t.Fatal("parseAppleDomainRedirect detected non-redirect status")
+	}
+}
+
+func TestAppleAuthSessionSwitchHost(t *testing.T) {
+	session := &appleAuthSession{Endpoints: appleAuthEndpointsForHost("www.icloud.com.cn")}
+	if !session.switchHost("www.icloud.com") {
+		t.Fatal("switchHost returned false, want true")
+	}
+	if session.Endpoints.Host != "www.icloud.com" || !strings.Contains(session.Endpoints.Auth, "idmsa.apple.com/appleauth") {
+		t.Fatalf("endpoints after switch = %+v", session.Endpoints)
+	}
+	if session.switchHost("www.icloud.com") {
+		t.Fatal("switchHost returned true for same host")
+	}
+}
+
 func TestCookieHeaderFiltersByDomainAndExpiry(t *testing.T) {
 	cookies := []SessionCookie{
 		{Name: "ok", Value: "1", Domain: ".icloud.com.cn", Path: "/"},
