@@ -18,6 +18,12 @@ import (
 	"time"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return fn(r)
+}
+
 func TestExtractOTP(t *testing.T) {
 	tests := []struct {
 		name string
@@ -119,6 +125,35 @@ func TestAppleAuthSessionRedirectForAccountCountry(t *testing.T) {
 	}
 	if _, ok := session.redirectForAccountCountry(); ok {
 		t.Fatal("redirectForAccountCountry returned ok=true for matching China host")
+	}
+}
+
+func TestAppleTransientNetworkErrorDetection(t *testing.T) {
+	if !isAppleTransientNetworkError(&url.Error{Op: "Post", URL: "https://setup.icloud.com/setup/ws/1/accountLogin", Err: io.EOF}) {
+		t.Fatal("EOF url error should be transient")
+	}
+	if !isAppleTransientNetworkError(fmt.Errorf("net/http: timeout awaiting response headers")) {
+		t.Fatal("timeout should be transient")
+	}
+	if isAppleTransientNetworkError(errCode("apple_protocol_http_error", "Apple 协议 HTTP 401", true)) {
+		t.Fatal("HTTP business error should not be transient")
+	}
+}
+
+func TestRetryAppleTransientRetriesEOF(t *testing.T) {
+	attempts := 0
+	err := retryAppleTransient(t.Context(), func() error {
+		attempts++
+		if attempts < 2 {
+			return io.EOF
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
 	}
 }
 
@@ -303,6 +338,44 @@ func TestICloudClientListPrivacyMailboxes(t *testing.T) {
 	}
 	if remotes[1].Email != "old@icloud.com" || remotes[1].IsActive {
 		t.Fatalf("second remote = %+v", remotes[1])
+	}
+}
+
+func TestICloudClientListPrivacyMailboxesRetriesEOF(t *testing.T) {
+	attempts := 0
+	client := &ICloudClient{client: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, io.EOF
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body: io.NopCloser(strings.NewReader(`{
+				"success": true,
+				"timestamp": 1,
+				"result": {"hmeEmails": [{"anonymousId":"a1","hme":"Retry.OK@icloud.com","label":"retry","isActive":true}]}
+			}`)),
+			Request: r,
+		}, nil
+	})}}
+	remotes, err := client.ListPrivacyMailboxes(t.Context(), ICloudSession{
+		PremiumMailBaseURL: "https://p39-maildomainws.icloud.com:443",
+		DSID:               "123",
+		ClientID:           "cid",
+		ClientBuildNumber:  "build",
+		MasteringNumber:    "master",
+		Host:               "www.icloud.com",
+		Cookies:            []SessionCookie{{Name: "session", Value: "x", Domain: ".icloud.com", Path: "/"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if len(remotes) != 1 || remotes[0].Email != "retry.ok@icloud.com" {
+		t.Fatalf("remotes = %+v", remotes)
 	}
 }
 
@@ -572,6 +645,86 @@ func TestMailboxEmailExportFormatsAreScoped(t *testing.T) {
 		if !strings.Contains(adminBody, email) {
 			t.Fatalf("admin export missing email %q in %q", email, adminBody)
 		}
+	}
+}
+
+func TestMailboxExportFiltersByAccountID(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
+	adminCookie, _ := registerTestUser(t, handler, "admin", "admin123")
+	accOne, err := store.AddAccountForOwner("", "Apple One", "one@example.com", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	accTwo, err := store.AddAccountForOwner("", "Apple Two", "two@example.com", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddMailboxForOwner("", accOne.ID, "ONE", "one-alias@icloud.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddMailboxForOwner("", accTwo.ID, "TWO", "two-alias@icloud.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/export-mailbox-apis?account_id="+url.QueryEscape(accOne.ID), nil)
+	req.AddCookie(adminCookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("account filtered api export status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "one-alias@icloud.com----https://mail.example/api/v1/mailboxes/one-alias@icloud.com/code?key=") {
+		t.Fatalf("filtered export missing account one API: %q", body)
+	}
+	if strings.Contains(body, "two-alias@icloud.com") {
+		t.Fatalf("filtered export leaked account two: %q", body)
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/runtime/export-mailbox-emails?format=jsonl&account_id="+url.QueryEscape(accTwo.ID), nil)
+	req.AddCookie(adminCookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("account filtered email export status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	body = rr.Body.String()
+	if !strings.Contains(body, `"email":"two-alias@icloud.com"`) || strings.Contains(body, "one-alias@icloud.com") || strings.Contains(body, "/api/v1/") {
+		t.Fatalf("filtered email export body = %q", body)
+	}
+}
+
+func TestMailboxExportAdminOwnerAndAccountFilter(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
+	adminCookie, _ := registerTestUser(t, handler, "admin", "admin123")
+	_, normalUser := registerTestUser(t, handler, "alice", "alice123")
+	adminAcc, err := store.AddAccountForOwner("", "Admin Apple", "admin@example.com", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	userAcc, err := store.AddAccountForOwner(normalUser.ID, "User Apple", "user@example.com", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddMailboxForOwner("", adminAcc.ID, "ADMIN", "admin-only@icloud.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddMailboxForOwner(normalUser.ID, userAcc.ID, "USER", "user-only@icloud.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/export-mailbox-emails?owner_id="+url.QueryEscape(normalUser.ID)+"&account_id="+url.QueryEscape(userAcc.ID), nil)
+	req.AddCookie(adminCookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("owner/account filtered export status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "user-only@icloud.com\n") || strings.Contains(body, "admin-only@icloud.com") {
+		t.Fatalf("owner/account filtered export body = %q", body)
 	}
 }
 

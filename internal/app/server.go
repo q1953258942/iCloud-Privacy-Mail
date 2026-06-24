@@ -451,10 +451,12 @@ func (s *Server) writeMailboxTextExport(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	state := s.scopedState(r)
+	state := s.mailboxExportState(r)
+	accountID := normalizeExportAccountID(r.URL.Query().Get("account_id"))
+	mailboxes := filterMailboxesForExport(state.Mailboxes, accountID)
 	var out strings.Builder
 	if format.jsonl {
-		for _, mailbox := range state.Mailboxes {
+		for _, mailbox := range mailboxes {
 			record := s.mailboxExportRecord(r, mailbox, mode)
 			if len(record) == 0 {
 				continue
@@ -478,7 +480,7 @@ func (s *Server) writeMailboxTextExport(w http.ResponseWriter, r *http.Request, 
 		if format.separator == "\t" {
 			writer.Comma = '\t'
 		}
-		for _, mailbox := range state.Mailboxes {
+		for _, mailbox := range mailboxes {
 			record := s.mailboxExportRecord(r, mailbox, mode)
 			if len(record) == 0 {
 				continue
@@ -494,7 +496,7 @@ func (s *Server) writeMailboxTextExport(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	} else {
-		for _, mailbox := range state.Mailboxes {
+		for _, mailbox := range mailboxes {
 			record := s.mailboxExportRecord(r, mailbox, mode)
 			if len(record) == 0 {
 				continue
@@ -508,12 +510,64 @@ func (s *Server) writeMailboxTextExport(w http.ResponseWriter, r *http.Request, 
 	if mode == mailboxExportEmail {
 		prefix = "icloud-mailbox-emails"
 	}
+	if accountID != "" {
+		prefix += "-" + safeFilenamePart(accountID)
+	}
 	filename := prefix + "-" + time.Now().Format("20060102-150405") + "." + format.ext
 	w.Header().Set("Content-Type", format.contentType)
 	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, out.String())
+}
+
+func (s *Server) mailboxExportState(r *http.Request) State {
+	ownerID := strings.TrimSpace(r.URL.Query().Get("owner_id"))
+	if s.isAdminRequest(r) && ownerID != "" && !strings.EqualFold(ownerID, "all") {
+		return s.store.SnapshotForOwner(ownerID)
+	}
+	return s.scopedState(r)
+}
+
+func normalizeExportAccountID(value string) string {
+	value = strings.TrimSpace(value)
+	switch strings.ToLower(value) {
+	case "", "all", "__all", "__current", "current":
+		return ""
+	default:
+		return value
+	}
+}
+
+func filterMailboxesForExport(mailboxes []Mailbox, accountID string) []Mailbox {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return mailboxes
+	}
+	out := make([]Mailbox, 0, len(mailboxes))
+	for _, mailbox := range mailboxes {
+		if constantTimeEqual(accountID, strings.TrimSpace(mailbox.AccountID)) {
+			out = append(out, mailbox)
+		}
+	}
+	return out
+}
+
+func safeFilenamePart(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 func (s *Server) mailboxExportRecord(r *http.Request, mailbox Mailbox, mode mailboxExportMode) []string {

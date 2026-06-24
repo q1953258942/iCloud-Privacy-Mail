@@ -57,6 +57,7 @@
     .eyebrow { color: var(--green-2); font-size: 12px; font-weight: 900; letter-spacing: .16em; text-transform: uppercase; margin-bottom: 6px; }
     .hero-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
     .hero-actions select.export-format, .toolbar select.export-format { width: auto; min-width: 94px; padding: 10px 12px; }
+    .hero-actions select.export-account, .toolbar select.export-account { width: auto; min-width: 190px; max-width: 260px; padding: 10px 12px; }
     main { max-width: 1480px; margin: 0 auto; padding: 22px 28px 34px; }
     .grid { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 14px; margin-bottom: 18px; }
     .card {
@@ -90,6 +91,33 @@
     .search-field { flex: 1 1 360px; max-width: 560px; }
     .pager { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; }
     .pager button { padding: 8px 11px; border-radius: 10px; }
+    .account-tabs, .session-tabs {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding: 10px 18px;
+      border-top: 1px solid rgba(118, 143, 174, .12);
+      border-bottom: 1px solid rgba(118, 143, 174, .12);
+      background: rgba(248, 251, 255, .56);
+    }
+    .account-tabs button, .session-tabs button {
+      flex: 0 0 auto;
+      padding: 8px 11px;
+      border-radius: 999px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, .84);
+    }
+    .account-tabs button.active, .session-tabs button.active {
+      color: #fff;
+      border-color: transparent;
+      background: linear-gradient(135deg, #13b8a6, #17c9ae);
+      box-shadow: 0 10px 22px rgba(19, 184, 166, .16);
+    }
+    .session-card {
+      padding-top: 10px;
+      line-height: 1.75;
+      color: #0f766e;
+    }
     .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 16px 18px; }
     .field-grid .full, .form .full { grid-column: 1 / -1; }
     .panel-body { padding-bottom: 2px; }
@@ -242,6 +270,10 @@
           <option value="tsv">TSV</option>
           <option value="jsonl">JSONL</option>
         </select>
+        <select id="mailboxExportAccount" class="export-account" title="导出账号范围">
+          <option value="__current">当前TAB账号</option>
+          <option value="">全部登录态</option>
+        </select>
         <button onclick="exportMailboxAPIs()">导出邮箱API</button>
         <button onclick="exportMailboxEmails()">只导出邮箱</button>
         <button onclick="openRunConfig()">运行配置</button>
@@ -344,6 +376,7 @@
             <button id="mailboxNextPage" onclick="changeMailboxPage(1)">下一页</button>
           </div>
         </div>
+        <div id="mailboxAccountTabs" class="account-tabs"></div>
         <div class="table-wrap">
           <table>
             <thead><tr><th>标签</th><th>邮箱</th><th>状态</th><th>收件</th><th>API</th><th>操作</th></tr></thead>
@@ -408,11 +441,15 @@
           <option value="tsv">TSV</option>
           <option value="jsonl">JSONL</option>
         </select>
+        <select id="mailboxExportAccountModal" class="export-account" title="导出账号范围">
+          <option value="__current">当前TAB账号</option>
+          <option value="">全部登录态</option>
+        </select>
         <button onclick="exportMailboxAPIs('mailboxExportFormatModal')">导出邮箱API</button>
         <button onclick="exportMailboxEmails('mailboxExportFormatModal')">只导出邮箱</button>
         <button class="ghost" onclick="closeRunConfig()">关闭</button>
       </div>
-      <div class="hint">导出数据：当前账号的登录账号/登录态 + 隐私邮箱池；邮箱API 每行 邮箱----API / CSV 两列；只导出邮箱为一行一个邮箱。管理员导出全量数据，普通用户只导出自己的数据。</div>
+      <div class="hint">导出数据：当前账号的登录账号/登录态 + 隐私邮箱池；邮箱API 每行 邮箱----API / CSV 两列；只导出邮箱为一行一个邮箱。导出邮箱支持选择指定 Apple 登录态。管理员导出全量数据，普通用户只导出自己的数据。</div>
     </section>
   </div>
   <script>
@@ -423,6 +460,8 @@
     let lastICloudSessions = [];
     let mailboxPage = 1;
     const mailboxPageSize = 10;
+    let activeMailboxAccountKey = 'all';
+    let activeICloudSessionKey = '';
     let protocolPendingID = '';
     let sessionCheckTimer = null;
     let sessionCheckInFlight = false;
@@ -583,6 +622,30 @@
       return el && el.value ? el.value : 'txt';
     }
 
+    function mailboxExportAccountSelectID(formatSelectID) {
+      return formatSelectID === 'mailboxExportFormatModal' ? 'mailboxExportAccountModal' : 'mailboxExportAccount';
+    }
+
+    function selectedMailboxExportAccountID(formatSelectID) {
+      const el = $(mailboxExportAccountSelectID(formatSelectID));
+      const value = el ? el.value : '__current';
+      if (value === '__current') {
+        if (activeMailboxAccountKey !== 'all' && activeMailboxAccountKey !== 'unbound') {
+          const exists = lastMailboxes.some(row => row.account_id && row.account_id === activeMailboxAccountKey);
+          return exists ? activeMailboxAccountKey : '';
+        }
+        return '';
+      }
+      return value || '';
+    }
+
+    function mailboxExportURL(path, format, formatSelectID) {
+      const params = new URLSearchParams({format});
+      const accountID = selectedMailboxExportAccountID(formatSelectID);
+      if (accountID) params.set('account_id', accountID);
+      return `${path}?${params.toString()}`;
+    }
+
     function exportFileTypes(format) {
       if (format === 'csv') {
         return [{description: 'CSV 文件', accept: {'text/csv': ['.csv']}}];
@@ -647,24 +710,26 @@
 
     async function exportMailboxAPIs(selectID) {
       const format = selectedMailboxExportFormat(selectID);
+      const accountID = selectedMailboxExportAccountID(selectID);
       await downloadExportFile(
-        `/api/runtime/export-mailbox-apis?format=${encodeURIComponent(format)}`,
+        mailboxExportURL('/api/runtime/export-mailbox-apis', format, selectID),
         `icloud-mailbox-apis-${Date.now()}.${format}`,
         format,
         '已取消导出邮箱API',
-        `已导出邮箱API ${format.toUpperCase()}：每行一个邮箱API`,
+        `已导出邮箱API ${format.toUpperCase()}：${accountID ? '指定登录态' : '全部登录态'}，每行一个邮箱API`,
         '导出邮箱API失败'
       );
     }
 
     async function exportMailboxEmails(selectID) {
       const format = selectedMailboxExportFormat(selectID);
+      const accountID = selectedMailboxExportAccountID(selectID);
       await downloadExportFile(
-        `/api/runtime/export-mailbox-emails?format=${encodeURIComponent(format)}`,
+        mailboxExportURL('/api/runtime/export-mailbox-emails', format, selectID),
         `icloud-mailbox-emails-${Date.now()}.${format}`,
         format,
         '已取消导出邮箱',
-        `已导出邮箱 ${format.toUpperCase()}：一行一个邮箱`,
+        `已导出邮箱 ${format.toUpperCase()}：${accountID ? '指定登录态' : '全部登录态'}，一行一个邮箱`,
         '导出邮箱失败'
       );
     }
@@ -835,7 +900,11 @@
 
     function filteredMailboxes() {
       const keyword = ($('mailboxSearch') ? $('mailboxSearch').value : '').trim().toLowerCase();
-      const rows = !keyword ? lastMailboxes.slice() : lastMailboxes.filter(row => {
+      let baseRows = lastMailboxes.slice();
+      if (!keyword && activeMailboxAccountKey !== 'all') {
+        baseRows = baseRows.filter(row => mailboxAccountKey(row) === activeMailboxAccountKey);
+      }
+      const rows = !keyword ? baseRows : lastMailboxes.filter(row => {
         const haystack = [
           row.email,
           row.label,
@@ -856,12 +925,72 @@
       });
     }
 
+    function mailboxAccountKey(row) {
+      return row.account_id || row.account_apple_id || row.account_label || 'unbound';
+    }
+
+    function renderMailboxAccountTabs() {
+      const tabs = $('mailboxAccountTabs');
+      if (!tabs) return;
+      const groups = new Map();
+      for (const row of lastMailboxes) {
+        const key = mailboxAccountKey(row);
+        if (!groups.has(key)) {
+          groups.set(key, {key, title: mailboxAccountTitle(row), count: 0});
+        }
+        groups.get(key).count++;
+      }
+      if (activeMailboxAccountKey !== 'all' && !groups.has(activeMailboxAccountKey)) {
+        activeMailboxAccountKey = 'all';
+      }
+      const ordered = [...groups.values()].sort((a, b) => a.title.localeCompare(b.title));
+      const buttons = [
+        `<button class="${activeMailboxAccountKey === 'all' ? 'active' : ''}" onclick="setMailboxAccountTab('all')">全部 ${lastMailboxes.length}</button>`
+      ];
+      for (const group of ordered) {
+        buttons.push(`<button class="${activeMailboxAccountKey === group.key ? 'active' : ''}" onclick="setMailboxAccountTab(${esc(JSON.stringify(group.key))})">${esc(group.title)} ${group.count}</button>`);
+      }
+      tabs.innerHTML = buttons.join('');
+      renderMailboxExportAccountOptions();
+    }
+
+    function renderMailboxExportAccountOptions() {
+      const groups = new Map();
+      for (const row of lastMailboxes) {
+        if (!row.account_id) continue;
+        if (!groups.has(row.account_id)) {
+          groups.set(row.account_id, {id: row.account_id, title: mailboxAccountTitle(row), count: 0});
+        }
+        groups.get(row.account_id).count++;
+      }
+      const ordered = [...groups.values()].sort((a, b) => a.title.localeCompare(b.title));
+      for (const id of ['mailboxExportAccount', 'mailboxExportAccountModal']) {
+        const select = $(id);
+        if (!select) continue;
+        const current = select.value || '__current';
+        select.innerHTML = [
+          '<option value="__current">当前TAB账号</option>',
+          '<option value="">全部登录态</option>',
+          ...ordered.map(group => `<option value="${esc(group.id)}">${esc(group.title)} · ${group.count}</option>`)
+        ].join('');
+        const values = new Set(['__current', '', ...ordered.map(group => group.id)]);
+        select.value = values.has(current) ? current : '__current';
+      }
+    }
+
+    function setMailboxAccountTab(key) {
+      activeMailboxAccountKey = key || 'all';
+      mailboxPage = 1;
+      renderMailboxes();
+    }
+
     function changeMailboxPage(delta) {
       mailboxPage += delta;
       renderMailboxes();
     }
 
     function renderMailboxes() {
+      renderMailboxAccountTabs();
       const rows = filteredMailboxes();
       const totalPages = Math.max(1, Math.ceil(rows.length / mailboxPageSize));
       mailboxPage = Math.max(1, Math.min(totalPages, mailboxPage));
@@ -939,19 +1068,41 @@
         $('icloudSessionInfo').textContent = '未保存登录态。请输入 Apple ID/密码发起协议登录，收到 2FA 后提交验证码。';
         return;
       }
-      $('icloudSessionInfo').textContent = `已保存 ${sessions.length} 个 Apple 登录态：\n` + sessions.map((session, index) => {
-        const flags = [
-          session.is_icloud_plus ? 'iCloud+ active' : '无 iCloud+',
-          session.can_create_hme ? '可创建隐私邮箱' : '不可创建隐私邮箱',
-          `Cookie ${session.cookie_count || 0}`
-        ].join(' / ');
-        const checkLine = session.last_checked_at
-          ? `最近检测：${session.last_check_ok ? '正常' : '失败'} / ${session.last_checked_at}`
-          : '最近检测：未检测';
-        return `${index + 1}. ${session.apple_id || '-'}，账号ID=${session.account_id || '-'}，DSID=${session.dsid_mask || '-'}\n` +
-          `   ${flags}\n` +
-          `   ${checkLine}；状态：${session.last_status_message || '-'}；保存时间：${session.saved_at || '-'}`;
-      }).join('\n');
+      if (!activeICloudSessionKey || !sessions.some(session => sessionKey(session) === activeICloudSessionKey)) {
+        activeICloudSessionKey = sessionKey(sessions[0]);
+      }
+      const active = sessions.find(session => sessionKey(session) === activeICloudSessionKey) || sessions[0];
+      const tabs = sessions.map((session, index) => {
+        const key = sessionKey(session);
+        const title = session.apple_id || session.account_id || `账号 ${index + 1}`;
+        return `<button class="${key === activeICloudSessionKey ? 'active' : ''}" onclick="setICloudSessionTab(${esc(JSON.stringify(key))})">${esc(title)}</button>`;
+      }).join('');
+      const flags = [
+        active.is_icloud_plus ? 'iCloud+ active' : '无 iCloud+',
+        active.can_create_hme ? '可创建隐私邮箱' : '不可创建隐私邮箱',
+        `Cookie ${active.cookie_count || 0}`
+      ].join(' / ');
+      const checkLine = active.last_checked_at
+        ? `最近检测：${active.last_check_ok ? '正常' : '失败'} / ${active.last_checked_at}`
+        : '最近检测：未检测';
+      $('icloudSessionInfo').innerHTML =
+        `<div>已保存 ${sessions.length} 个 Apple 登录态，点击 TAB 切换查看。</div>` +
+        `<div class="session-tabs">${tabs}</div>` +
+        `<div class="session-card">Apple ID：${esc(active.apple_id || '-')}<br>` +
+        `账号ID：${esc(active.account_id || '-')}，DSID=${esc(active.dsid_mask || '-')}<br>` +
+        `${esc(flags)}<br>` +
+        `${esc(checkLine)}<br>` +
+        `状态：${esc(active.last_status_message || '-')}<br>` +
+        `保存时间：${esc(active.saved_at || '-')}</div>`;
+    }
+
+    function sessionKey(session) {
+      return session.account_id || session.apple_id || session.dsid_mask || '';
+    }
+
+    function setICloudSessionTab(key) {
+      activeICloudSessionKey = key || '';
+      renderICloudSessions(lastICloudSessions);
     }
 
     async function createAccount() {

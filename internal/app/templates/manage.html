@@ -119,6 +119,7 @@
     .subtitle { margin-top: 8px; color: var(--muted); line-height: 1.6; }
     .actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
     .actions select.export-format { width: auto; min-width: 94px; border: 1px solid var(--line-strong); border-radius: 12px; background: rgba(255,255,255,.9); color: var(--text); padding: 10px 12px; font-weight: 850; }
+    .actions select.export-account { width: auto; min-width: 190px; max-width: 260px; border: 1px solid var(--line-strong); border-radius: 12px; background: rgba(255,255,255,.9); color: var(--text); padding: 10px 12px; font-weight: 850; }
     .btn {
       border: 1px solid var(--line-strong);
       border-radius: 12px;
@@ -283,6 +284,9 @@
               <option value="csv">CSV</option>
               <option value="tsv">TSV</option>
               <option value="jsonl">JSONL</option>
+            </select>
+            <select id="mailboxExportAccount" class="export-account" title="导出账号范围">
+              <option value="">当前查看全部登录态</option>
             </select>
             <button class="btn" onclick="exportMailboxAPIs()">导出邮箱API</button>
             <button class="btn" onclick="exportMailboxEmails()">只导出邮箱</button>
@@ -522,6 +526,7 @@
           <td>${esc(a.created_at || '-')}</td>
         </tr>`).join('');
       renderEmpty('accounts', accounts);
+      renderMailboxExportAccountOptions(accounts, mailboxes);
     }
     async function exportData() {
       const res = await fetch('/api/runtime/export', {credentials:'same-origin'});
@@ -565,6 +570,33 @@
     function selectedMailboxExportFormat() {
       const el = $('mailboxExportFormat');
       return el && el.value ? el.value : 'txt';
+    }
+
+    function renderMailboxExportAccountOptions(accounts, mailboxes) {
+      const select = $('mailboxExportAccount');
+      if (!select) return;
+      const current = select.value || '';
+      const counts = new Map();
+      for (const mailbox of mailboxes || []) {
+        if (mailbox.account_id) counts.set(mailbox.account_id, (counts.get(mailbox.account_id) || 0) + 1);
+      }
+      const options = ['<option value="">当前查看全部登录态</option>'];
+      for (const account of accounts || []) {
+        const count = counts.get(account.id) || 0;
+        const title = [account.label, account.apple_id].filter(Boolean).join(' / ') || account.id;
+        options.push(`<option value="${esc(account.id)}">${esc(title)} · ${count}</option>`);
+      }
+      select.innerHTML = options.join('');
+      const values = new Set(['', ...(accounts || []).map(account => account.id)]);
+      select.value = values.has(current) ? current : '';
+    }
+
+    function mailboxExportURL(path, format) {
+      const params = new URLSearchParams({format});
+      const accountID = $('mailboxExportAccount') ? $('mailboxExportAccount').value : '';
+      if (selectedOwner && selectedOwner !== 'all') params.set('owner_id', selectedOwner);
+      if (accountID) params.set('account_id', accountID);
+      return `${path}?${params.toString()}`;
     }
 
     function exportFileTypes(format) {
@@ -625,24 +657,26 @@
 
     async function exportMailboxAPIs() {
       const format = selectedMailboxExportFormat();
+      const accountID = $('mailboxExportAccount') ? $('mailboxExportAccount').value : '';
       await downloadExportFile(
-        `/api/runtime/export-mailbox-apis?format=${encodeURIComponent(format)}`,
+        mailboxExportURL('/api/runtime/export-mailbox-apis', format),
         `icloud-mailbox-apis-${Date.now()}.${format}`,
         format,
         '已取消导出邮箱API',
-        `邮箱API已导出 ${format.toUpperCase()}：每行一个邮箱API`,
+        `邮箱API已导出 ${format.toUpperCase()}：${accountID ? '指定登录态' : '当前查看范围'}，每行一个邮箱API`,
         '导出邮箱API失败'
       );
     }
 
     async function exportMailboxEmails() {
       const format = selectedMailboxExportFormat();
+      const accountID = $('mailboxExportAccount') ? $('mailboxExportAccount').value : '';
       await downloadExportFile(
-        `/api/runtime/export-mailbox-emails?format=${encodeURIComponent(format)}`,
+        mailboxExportURL('/api/runtime/export-mailbox-emails', format),
         `icloud-mailbox-emails-${Date.now()}.${format}`,
         format,
         '已取消导出邮箱',
-        `邮箱已导出 ${format.toUpperCase()}：一行一个邮箱`,
+        `邮箱已导出 ${format.toUpperCase()}：${accountID ? '指定登录态' : '当前查看范围'}，一行一个邮箱`,
         '导出邮箱失败'
       );
     }

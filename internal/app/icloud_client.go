@@ -78,7 +78,9 @@ func (c *ICloudClient) ListPrivacyMailboxes(ctx context.Context, session ICloudS
 			Origin         string `json:"origin"`
 		} `json:"hmeEmails"`
 	}
-	if err := c.call(ctx, session, http.MethodGet, "/v2/hme/list", nil, &out); err != nil {
+	if err := retryAppleTransient(ctx, func() error {
+		return c.call(ctx, session, http.MethodGet, "/v2/hme/list", nil, &out)
+	}); err != nil {
 		return nil, err
 	}
 	remotes := make([]ICloudRemoteMailbox, 0, len(out.HMEEmails))

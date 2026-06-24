@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -431,8 +432,10 @@ func (c *AppleAuthClient) validateTrustedDeviceCode(ctx context.Context, session
 }
 
 func (c *AppleAuthClient) trustSession(ctx context.Context, session *appleAuthSession) error {
-	_, _, err := c.do(ctx, session, http.MethodGet, session.Endpoints.Auth+"/2sv/trust", session.authHeaders(), nil, nil, false)
-	return err
+	return retryAppleTransient(ctx, func() error {
+		_, _, err := c.do(ctx, session, http.MethodGet, session.Endpoints.Auth+"/2sv/trust", session.authHeaders(), nil, nil, false)
+		return err
+	})
 }
 
 func (c *AppleAuthClient) authWithTokenAndValidate(ctx context.Context, session *appleAuthSession) (ICloudSession, error) {
@@ -447,7 +450,10 @@ func (c *AppleAuthClient) authWithTokenAndValidate(ctx context.Context, session 
 		"trustToken":         session.TrustToken,
 	}
 	headers := session.commonHeaders(map[string]string{})
-	if _, _, err := c.do(ctx, session, http.MethodPost, session.Endpoints.Setup+"/accountLogin", headers, body, &account, false); err != nil {
+	if err := retryAppleTransient(ctx, func() error {
+		_, _, err := c.do(ctx, session, http.MethodPost, session.Endpoints.Setup+"/accountLogin", headers, body, &account, false)
+		return err
+	}); err != nil {
 		return ICloudSession{}, err
 	}
 	cookies := session.cloneCookies()
@@ -526,6 +532,58 @@ func (c *AppleAuthClient) do(ctx context.Context, session *appleAuthSession, met
 		}
 	}
 	return resp.StatusCode, data, nil
+}
+
+func retryAppleTransient(ctx context.Context, fn func() error) error {
+	var last error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := fn(); err != nil {
+			if !isAppleTransientNetworkError(err) {
+				return err
+			}
+			last = err
+			if attempt == 2 {
+				break
+			}
+			timer := time.NewTimer(time.Duration(attempt+1) * 800 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+			continue
+		}
+		return nil
+	}
+	return last
+}
+
+func isAppleTransientNetworkError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	text := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"eof",
+		"timeout",
+		"connection reset",
+		"connection refused",
+		"server closed idle connection",
+		"tls handshake timeout",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *appleAuthSession) extract(resp *http.Response) {
