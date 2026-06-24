@@ -53,13 +53,12 @@ type appleSRPInitResponse struct {
 }
 
 type appleAuthStartResult struct {
-	Session     ICloudSession
-	PendingID   string
-	Needs2FA    bool
-	Message     string
-	AppleID     string
-	ExpiresAt   time.Time
-	CanFallback bool
+	Session   ICloudSession
+	PendingID string
+	Needs2FA  bool
+	Message   string
+	AppleID   string
+	ExpiresAt time.Time
 }
 
 type appleAccountInfo struct {
@@ -167,24 +166,23 @@ func (c *AppleAuthClient) StartLogin(ctx context.Context, appleID, password, def
 		return appleAuthStartResult{}, err
 	}
 	if session.SessionToken == "" {
-		return appleAuthStartResult{}, errCode("apple_session_token_missing", "Apple 登录未返回 Session Token，可能需要浏览器兜底", true)
+		return appleAuthStartResult{}, errCode("apple_session_token_missing", "Apple 登录未返回 Session Token，请重新协议登录或检查账号安全状态", true)
 	}
 	if needs2FA {
 		message := "已触发 Apple 2FA，请在受信任设备允许后输入 6 位验证码"
 		if err := c.requestTrustedDeviceCode(ctx, session); err != nil {
-			message = "Apple 已要求 2FA；自动触发验证码未确认，请查看受信任设备或使用浏览器兜底"
+			message = "Apple 已要求 2FA；自动触发验证码未确认，请查看受信任设备后输入验证码"
 		}
 		pending, err := pendingStore.put(session)
 		if err != nil {
 			return appleAuthStartResult{}, err
 		}
 		return appleAuthStartResult{
-			PendingID:   pending.ID,
-			Needs2FA:    true,
-			Message:     message,
-			AppleID:     maskAppleID(appleID),
-			ExpiresAt:   pending.ExpiresAt,
-			CanFallback: true,
+			PendingID: pending.ID,
+			Needs2FA:  true,
+			Message:   message,
+			AppleID:   maskAppleID(appleID),
+			ExpiresAt: pending.ExpiresAt,
 		}, nil
 	}
 
@@ -195,12 +193,11 @@ func (c *AppleAuthClient) StartLogin(ctx context.Context, appleID, password, def
 			return appleAuthStartResult{}, putErr
 		}
 		return appleAuthStartResult{
-			PendingID:   pending.ID,
-			Needs2FA:    true,
-			Message:     "登录已进入二次验证；如果设备已弹码，请输入验证码继续",
-			AppleID:     maskAppleID(appleID),
-			ExpiresAt:   pending.ExpiresAt,
-			CanFallback: true,
+			PendingID: pending.ID,
+			Needs2FA:  true,
+			Message:   "登录已进入二次验证；如果设备已弹码，请输入验证码继续",
+			AppleID:   maskAppleID(appleID),
+			ExpiresAt: pending.ExpiresAt,
 		}, nil
 	}
 	return appleAuthStartResult{
@@ -352,7 +349,7 @@ func (c *AppleAuthClient) authWithTokenAndValidate(ctx context.Context, session 
 		return ICloudSession{}, err
 	}
 	cookies := session.cloneCookies()
-	validate, err := NewCDPSessionClient().validateICloud(ctx, cookies, session.Endpoints.Host)
+	validate, err := NewICloudSessionValidator().Validate(ctx, cookies, session.Endpoints.Host)
 	if err != nil {
 		return ICloudSession{}, err
 	}

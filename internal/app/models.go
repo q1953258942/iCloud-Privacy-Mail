@@ -1,6 +1,9 @@
 package app
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 const (
 	StatusActive    = "active"
@@ -19,7 +22,8 @@ const (
 
 type State struct {
 	NextID         int             `json:"next_id"`
-	BrowserClients []BrowserClient `json:"browser_clients,omitempty"`
+	Users          []User          `json:"users,omitempty"`
+	WebSessions    []WebSession    `json:"web_sessions,omitempty"`
 	Accounts       []Account       `json:"accounts"`
 	Mailboxes      []Mailbox       `json:"mailboxes"`
 	Messages       []Message       `json:"messages"`
@@ -27,16 +31,29 @@ type State struct {
 	ICloudSessions []ICloudSession `json:"icloud_sessions,omitempty"`
 }
 
-type BrowserClient struct {
-	Key        string    `json:"key"`
-	Label      string    `json:"label,omitempty"`
+type User struct {
+	ID           string    `json:"id"`
+	Username     string    `json:"username"`
+	PasswordHash string    `json:"password_hash"`
+	IsAdmin      bool      `json:"is_admin,omitempty"`
+	Status       string    `json:"status"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	LastLoginAt  time.Time `json:"last_login_at,omitempty"`
+}
+
+type WebSession struct {
+	TokenHash  string    `json:"token_hash"`
+	UserID     string    `json:"user_id,omitempty"`
+	IsAdmin    bool      `json:"is_admin,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 	LastSeenAt time.Time `json:"last_seen_at"`
+	ExpiresAt  time.Time `json:"expires_at"`
 }
 
 type Account struct {
 	ID           string    `json:"id"`
-	BrowserKey   string    `json:"browser_key,omitempty"`
+	OwnerID      string    `json:"owner_id,omitempty"`
 	Label        string    `json:"label"`
 	AppleID      string    `json:"apple_id"`
 	Status       string    `json:"status"`
@@ -48,7 +65,7 @@ type Account struct {
 
 type Mailbox struct {
 	ID           string    `json:"id"`
-	BrowserKey   string    `json:"browser_key,omitempty"`
+	OwnerID      string    `json:"owner_id,omitempty"`
 	AccountID    string    `json:"account_id"`
 	Label        string    `json:"label"`
 	Email        string    `json:"email"`
@@ -58,13 +75,15 @@ type Mailbox struct {
 	ReceiveCount int       `json:"receive_count"`
 	Status       string    `json:"status"`
 	Note         string    `json:"note"`
+	LastSyncAt   time.Time `json:"last_sync_at,omitempty"`
+	LastSyncUID  string    `json:"last_sync_uid,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type Message struct {
 	ID         string    `json:"id"`
-	BrowserKey string    `json:"browser_key,omitempty"`
+	OwnerID    string    `json:"owner_id,omitempty"`
 	MailboxID  string    `json:"mailbox_id"`
 	RemoteID   string    `json:"remote_id,omitempty"`
 	Source     string    `json:"source,omitempty"`
@@ -76,7 +95,8 @@ type Message struct {
 }
 
 type ICloudSession struct {
-	BrowserKey         string          `json:"browser_key,omitempty"`
+	OwnerID            string          `json:"owner_id,omitempty"`
+	AccountID          string          `json:"account_id,omitempty"`
 	SavedAt            time.Time       `json:"saved_at"`
 	AppleID            string          `json:"apple_id,omitempty"`
 	DSID               string          `json:"dsid"`
@@ -96,6 +116,66 @@ type ICloudSession struct {
 	LastStatusMessage  string          `json:"last_status_message,omitempty"`
 }
 
+func (a *Account) UnmarshalJSON(data []byte) error {
+	type alias Account
+	aux := struct {
+		*alias
+		LegacyOwnerID string `json:"browser_key,omitempty"`
+	}{alias: (*alias)(a)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if a.OwnerID == "" {
+		a.OwnerID = aux.LegacyOwnerID
+	}
+	return nil
+}
+
+func (m *Mailbox) UnmarshalJSON(data []byte) error {
+	type alias Mailbox
+	aux := struct {
+		*alias
+		LegacyOwnerID string `json:"browser_key,omitempty"`
+	}{alias: (*alias)(m)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if m.OwnerID == "" {
+		m.OwnerID = aux.LegacyOwnerID
+	}
+	return nil
+}
+
+func (m *Message) UnmarshalJSON(data []byte) error {
+	type alias Message
+	aux := struct {
+		*alias
+		LegacyOwnerID string `json:"browser_key,omitempty"`
+	}{alias: (*alias)(m)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if m.OwnerID == "" {
+		m.OwnerID = aux.LegacyOwnerID
+	}
+	return nil
+}
+
+func (s *ICloudSession) UnmarshalJSON(data []byte) error {
+	type alias ICloudSession
+	aux := struct {
+		*alias
+		LegacyOwnerID string `json:"browser_key,omitempty"`
+	}{alias: (*alias)(s)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if s.OwnerID == "" {
+		s.OwnerID = aux.LegacyOwnerID
+	}
+	return nil
+}
+
 type SessionCookie struct {
 	Name     string  `json:"name"`
 	Value    string  `json:"value"`
@@ -109,6 +189,8 @@ type SessionCookie struct {
 
 type publicAccount struct {
 	ID           string `json:"id"`
+	OwnerID      string `json:"owner_id,omitempty"`
+	Owner        string `json:"owner,omitempty"`
 	Label        string `json:"label"`
 	AppleID      string `json:"apple_id"`
 	Status       string `json:"status"`
@@ -119,23 +201,31 @@ type publicAccount struct {
 }
 
 type publicMailbox struct {
-	ID           string `json:"id"`
-	AccountID    string `json:"account_id"`
-	Label        string `json:"label"`
-	Email        string `json:"email"`
-	APITokenMask string `json:"api_token_mask"`
-	APIURL       string `json:"api_url"`
-	APIActive    bool   `json:"api_active"`
-	ICloudActive bool   `json:"icloud_active"`
-	ReceiveCount int    `json:"receive_count"`
-	Status       string `json:"status"`
-	Note         string `json:"note"`
-	CreatedAt    string `json:"created_at"`
-	UpdatedAt    string `json:"updated_at"`
+	ID             string `json:"id"`
+	OwnerID        string `json:"owner_id,omitempty"`
+	Owner          string `json:"owner,omitempty"`
+	AccountID      string `json:"account_id"`
+	AccountLabel   string `json:"account_label,omitempty"`
+	AccountAppleID string `json:"account_apple_id,omitempty"`
+	Label          string `json:"label"`
+	Email          string `json:"email"`
+	APITokenMask   string `json:"api_token_mask"`
+	APIURL         string `json:"api_url"`
+	APIActive      bool   `json:"api_active"`
+	ICloudActive   bool   `json:"icloud_active"`
+	ReceiveCount   int    `json:"receive_count"`
+	Status         string `json:"status"`
+	Note           string `json:"note"`
+	LastSyncAt     string `json:"last_sync_at,omitempty"`
+	LastSyncUID    string `json:"last_sync_uid,omitempty"`
+	CreatedAt      string `json:"created_at"`
+	UpdatedAt      string `json:"updated_at"`
 }
 
 type publicMessage struct {
 	ID         string `json:"id"`
+	OwnerID    string `json:"owner_id,omitempty"`
+	Owner      string `json:"owner,omitempty"`
 	MailboxID  string `json:"mailbox_id"`
 	Subject    string `json:"subject"`
 	From       string `json:"from"`
@@ -144,8 +234,33 @@ type publicMessage struct {
 	CreatedAt  string `json:"created_at"`
 }
 
+type publicUser struct {
+	ID          string `json:"id"`
+	Username    string `json:"username"`
+	Status      string `json:"status"`
+	IsAdmin     bool   `json:"is_admin,omitempty"`
+	CreatedAt   string `json:"created_at,omitempty"`
+	UpdatedAt   string `json:"updated_at,omitempty"`
+	LastLoginAt string `json:"last_login_at,omitempty"`
+}
+
+type publicUserSummary struct {
+	OwnerID               string `json:"owner_id"`
+	Username              string `json:"username"`
+	Status                string `json:"status"`
+	IsAdmin               bool   `json:"is_admin,omitempty"`
+	AccountCount          int    `json:"account_count"`
+	MailboxCount          int    `json:"mailbox_count"`
+	AvailableMailboxCount int    `json:"available_mailbox_count"`
+	UsedMailboxCount      int    `json:"used_mailbox_count"`
+	MessageCount          int    `json:"message_count"`
+	ICloudSessionSaved    bool   `json:"icloud_session_saved"`
+	LastLoginAt           string `json:"last_login_at,omitempty"`
+}
+
 type publicICloudSession struct {
 	Saved              bool   `json:"saved"`
+	AccountID          string `json:"account_id,omitempty"`
 	SavedAt            string `json:"saved_at,omitempty"`
 	AppleID            string `json:"apple_id,omitempty"`
 	DSIDMask           string `json:"dsid_mask,omitempty"`

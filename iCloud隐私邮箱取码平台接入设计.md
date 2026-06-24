@@ -871,13 +871,13 @@ DELETE /api/v1/mailboxes/{id}
 本独立项目已从“只导入已有邮箱”推进到协议创建阶段：
 
 1. 前端新增 `iCloud 协议登录态` 面板。
-2. 支持调用比特浏览器本地 API 打开 iCloud 登录窗口。
-3. 支持用户手动登录后，通过 CDP 只读取当前窗口 Cookie；登录态校验由 Go 后端直接请求 `setup/ws/1/validate` 完成，不再在页面上下文执行取信/校验脚本。
-4. 登录态只保存到本机 `data/state.json`，不返回 Cookie/Session 原文到前端。
+2. 支持 Go 后端 Apple SRP 协议登录；Apple 要求 2FA 时由用户输入受信任设备收到的 6 位验证码继续。
+3. 登录态校验由 Go 后端直接请求 `setup/ws/1/validate` 完成；当前实现不依赖比特浏览器、CDP 或浏览器页面脚本。
+4. 登录态只保存到服务器 `config.json` 指定的 `data_path`，不返回 Cookie/Session 原文到前端。
 5. 支持协议创建隐私邮箱：
    - `POST /v1/hme/generate`
    - `POST /v1/hme/reserve`
-6. 创建成功后自动写入本地邮箱列表，并生成对外取码 API 地址。
+6. 创建成功后自动写入服务器邮箱列表，并生成对外取码 API 地址。
 
 当前已继续实现：
 
@@ -887,11 +887,12 @@ DELETE /api/v1/mailboxes/{id}
 4. 对外取码接口会先同步再查本地邮件，避免只依赖手动导入。
 5. 支持 `POST /api/mailboxes/{id}/sync` 手动同步邮件。
 6. 支持 `GET /api/v1/health` 和 `POST /api/v1/mailboxes/claim` 给外部系统检查/自动取号。
-7. 支持 `admin_key` 保护管理接口，保留单邮箱 key 和全局 `api_key` 作为对外取码鉴权。
+7. 管理面板改为账号密码登录；第一个注册账号自动成为管理员，普通账号只能访问自己的数据。
+8. 已移除旧版 Admin Key 管理入口；对外取码仍保留单邮箱 key，全局 `api_key` 只用于健康检查和自动取号。
+9. 支持从前端导出当前账号有权访问的数据，服务器数据目录不再由前端修改。
 
 当前仍未实现：
 
-1. 自动登录 Apple ID。
-2. 自动处理 2FA。
-3. 批量创建队列。
-4. 主注册项目里的 `icloud_api` 邮箱来源接入。
+1. 更细的登录态状态和失败原因分类。
+2. 数据导入/恢复功能。
+3. 主注册项目里的 `icloud_api` 邮箱来源接入。
