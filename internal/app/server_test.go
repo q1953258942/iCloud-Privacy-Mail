@@ -82,6 +82,46 @@ func TestAppleAuthSessionSwitchHost(t *testing.T) {
 	}
 }
 
+func TestAppleHostForAccountCountry(t *testing.T) {
+	tests := []struct {
+		country string
+		want    string
+	}{
+		{country: "", want: ""},
+		{country: "CHN", want: "www.icloud.com.cn"},
+		{country: "CN", want: "www.icloud.com.cn"},
+		{country: "USA", want: "www.icloud.com"},
+		{country: "sgp", want: "www.icloud.com"},
+	}
+	for _, tt := range tests {
+		if got := appleHostForAccountCountry(tt.country); got != tt.want {
+			t.Fatalf("appleHostForAccountCountry(%q) = %q, want %q", tt.country, got, tt.want)
+		}
+	}
+}
+
+func TestAppleAuthSessionRedirectForAccountCountry(t *testing.T) {
+	session := &appleAuthSession{
+		Endpoints:      appleAuthEndpointsForHost("www.icloud.com.cn"),
+		AccountCountry: "USA",
+	}
+	redirect, ok := session.redirectForAccountCountry()
+	if !ok {
+		t.Fatal("redirectForAccountCountry returned ok=false")
+	}
+	if redirect.Host != "www.icloud.com" || redirect.DomainToUse != "iCloud.com" {
+		t.Fatalf("redirect = %+v, want www.icloud.com", redirect)
+	}
+
+	session = &appleAuthSession{
+		Endpoints:      appleAuthEndpointsForHost("www.icloud.com.cn"),
+		AccountCountry: "CHN",
+	}
+	if _, ok := session.redirectForAccountCountry(); ok {
+		t.Fatal("redirectForAccountCountry returned ok=true for matching China host")
+	}
+}
+
 func TestCookieHeaderFiltersByDomainAndExpiry(t *testing.T) {
 	cookies := []SessionCookie{
 		{Name: "ok", Value: "1", Domain: ".icloud.com.cn", Path: "/"},

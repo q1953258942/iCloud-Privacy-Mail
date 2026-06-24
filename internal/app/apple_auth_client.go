@@ -195,6 +195,9 @@ func (c *AppleAuthClient) startLoginOnHost(ctx context.Context, appleID, passwor
 	if err != nil {
 		return appleAuthStartResult{}, err
 	}
+	if redirect, ok := session.redirectForAccountCountry(); ok {
+		return appleAuthStartResult{}, redirect
+	}
 	if session.SessionToken == "" {
 		return appleAuthStartResult{}, errCode("apple_session_token_missing", "Apple 登录未返回 Session Token，请重新协议登录或检查账号安全状态", true)
 	}
@@ -306,6 +309,17 @@ func appleDomainToHost(domain string) string {
 		return "www.icloud.com"
 	}
 	return ""
+}
+
+func appleHostForAccountCountry(country string) string {
+	country = strings.ToUpper(strings.TrimSpace(country))
+	if country == "" {
+		return ""
+	}
+	if country == "CHN" || country == "CN" {
+		return "www.icloud.com.cn"
+	}
+	return "www.icloud.com"
 }
 
 func parseAppleDomainRedirect(status int, data []byte) (appleDomainRedirectError, bool) {
@@ -543,6 +557,22 @@ func (s *appleAuthSession) switchHost(host string) bool {
 	}
 	s.Endpoints = next
 	return true
+}
+
+func (s *appleAuthSession) redirectForAccountCountry() (appleDomainRedirectError, bool) {
+	host := appleHostForAccountCountry(s.AccountCountry)
+	if host == "" {
+		return appleDomainRedirectError{}, false
+	}
+	next := appleAuthEndpointsForHost(host)
+	if next.Host == "" || next.Host == s.Endpoints.Host {
+		return appleDomainRedirectError{}, false
+	}
+	domain := "iCloud.com"
+	if strings.Contains(next.Host, "icloud.com.cn") {
+		domain = "iCloud.com.cn"
+	}
+	return appleDomainRedirectError{DomainToUse: domain, Host: next.Host}, true
 }
 
 func (s *appleAuthSession) mergeCookies(requestURL *url.URL, cookies []*http.Cookie) {
