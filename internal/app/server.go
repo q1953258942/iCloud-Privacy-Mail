@@ -134,6 +134,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/manage/data", s.handleManageData)
 	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	s.mux.HandleFunc("POST /api/v1/mailboxes/claim", s.handleClaimMailbox)
+	s.mux.HandleFunc("POST /api/v1/mailboxes/lookup", s.handleLookupMailboxes)
 	s.mux.HandleFunc("GET /api/runtime/export", s.handleExportRuntimeData)
 	s.mux.HandleFunc("GET /api/runtime/export-mailbox-apis", s.handleExportMailboxAPIs)
 	s.mux.HandleFunc("GET /api/runtime/export-mailbox-emails", s.handleExportMailboxEmails)
@@ -369,6 +370,49 @@ func (s *Server) handleClaimMailbox(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"mailbox": s.publicMailbox(r, mailbox),
+	})
+}
+
+func (s *Server) handleLookupMailboxes(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizedGlobalAPI(r) {
+		writeError(w, http.StatusUnauthorized, errCode("global_api_key_required", "查询邮箱 API 需要配置并提交全局 API Key", false))
+		return
+	}
+	var payload struct {
+		Emails []string `json:"emails"`
+	}
+	if err := decodeJSON(r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(payload.Emails) == 0 || len(payload.Emails) > 500 {
+		writeError(w, http.StatusBadRequest, errCode("invalid_email_count", "邮箱数量必须是 1-500", false))
+		return
+	}
+
+	seen := make(map[string]struct{}, len(payload.Emails))
+	missing := make([]string, 0)
+	mailboxes := make([]publicMailbox, 0, len(payload.Emails))
+	for _, rawEmail := range payload.Emails {
+		email := strings.ToLower(strings.TrimSpace(rawEmail))
+		if email == "" {
+			continue
+		}
+		if _, ok := seen[email]; ok {
+			continue
+		}
+		seen[email] = struct{}{}
+		mailbox, ok := s.store.FindMailboxByEmail(email)
+		if !ok {
+			missing = append(missing, email)
+			continue
+		}
+		mailboxes = append(mailboxes, s.publicMailbox(r, mailbox))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":   true,
+		"mailboxes": mailboxes,
+		"missing":   missing,
 	})
 }
 
@@ -2042,6 +2086,9 @@ func (s *Server) requiresAdmin(r *http.Request) bool {
 		return false
 	}
 	if r.Method == http.MethodPost && r.URL.Path == "/api/v1/mailboxes/claim" {
+		return false
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/api/v1/mailboxes/lookup" {
 		return false
 	}
 	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/mailboxes/") && strings.HasSuffix(r.URL.Path, "/code") {

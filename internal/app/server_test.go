@@ -1274,6 +1274,53 @@ func TestClaimMailboxRequiresGlobalAPIKeyAndMarksUsed(t *testing.T) {
 	}
 }
 
+func TestLookupMailboxesRequiresGlobalAPIKeyAndKeepsStatus(t *testing.T) {
+	store := newTestStore(t)
+	mailbox, err := store.AddMailbox("", "UPI-1", "alias@icloud.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(Config{APIKey: "global-key", PublicBaseURL: "https://mail.example"}, store, discardLogger())
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mailboxes/lookup", strings.NewReader(`{"emails":["alias@icloud.com"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("lookup without key = %d, want 401", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/mailboxes/lookup", strings.NewReader(`{"emails":["ALIAS@icloud.com","missing@icloud.com"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer global-key")
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("lookup with key = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Success   bool            `json:"success"`
+		Mailboxes []publicMailbox `json:"mailboxes"`
+		Missing   []string        `json:"missing"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Success || len(body.Mailboxes) != 1 || body.Mailboxes[0].ID != mailbox.ID {
+		t.Fatalf("lookup body = %+v", body)
+	}
+	if len(body.Missing) != 1 || body.Missing[0] != "missing@icloud.com" {
+		t.Fatalf("missing = %+v", body.Missing)
+	}
+	if !strings.HasPrefix(body.Mailboxes[0].APIURL, "https://mail.example/") {
+		t.Fatalf("api_url = %q", body.Mailboxes[0].APIURL)
+	}
+	updated, ok := store.FindMailboxByEmail("alias@icloud.com")
+	if !ok || updated.Status != StatusAvailable {
+		t.Fatalf("lookup changed mailbox status: %+v ok=%v", updated, ok)
+	}
+}
+
 func TestMailboxSchedulerStartsCreatesAndStops(t *testing.T) {
 	store := newTestStore(t)
 	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
