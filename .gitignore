@@ -1,6 +1,7 @@
 # Build outputs
 bin/
 dist/
+发布目录/
 *.exe
 *.dll
 *.so
