@@ -908,6 +908,108 @@ func TestUserLoginScopesDataAndFirstUserIsAdmin(t *testing.T) {
 	}
 }
 
+func TestAdminCanDeleteNormalUserAndOwnedData(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
+
+	adminCookie, adminUser := registerTestUser(t, handler, "admin", "admin123")
+	userCookie, normalUser := registerTestUser(t, handler, "alice", "alice123")
+	account, err := store.AddAccountForOwner(normalUser.ID, "Alice Apple", "alice@example.com", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveICloudSessionForOwner(normalUser.ID, ICloudSession{
+		OwnerID: normalUser.ID,
+		AppleID: "alice@example.com",
+		DSID:    "alice-dsid",
+		Cookies: []SessionCookie{{Name: "session", Value: "secret"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := store.AddMailboxForOwner(normalUser.ID, account.ID, "ALICE", "alice-alias@icloud.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddMessage(mailbox.ID, "Your OpenAI code is 123456", "noreply@example.com", "123456", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/admin/users/"+normalUser.ID, nil)
+	req.AddCookie(adminCookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("admin delete user = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Deleted DeleteUserResult `json:"deleted"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Deleted.UserID != normalUser.ID || body.Deleted.Accounts != 1 || body.Deleted.Mailboxes != 1 || body.Deleted.Messages != 1 || body.Deleted.ICloudSessions != 1 || body.Deleted.WebSessions == 0 {
+		t.Fatalf("deleted result = %+v", body.Deleted)
+	}
+
+	state := store.Snapshot()
+	if len(state.Users) != 1 || state.Users[0].ID != adminUser.ID {
+		t.Fatalf("users after delete = %+v", state.Users)
+	}
+	if len(state.Accounts) != 0 || len(state.Mailboxes) != 0 || len(state.Messages) != 0 || len(state.ICloudSessions) != 0 {
+		t.Fatalf("owned data after delete accounts=%d mailboxes=%d messages=%d sessions=%d", len(state.Accounts), len(state.Mailboxes), len(state.Messages), len(state.ICloudSessions))
+	}
+	for _, session := range state.WebSessions {
+		if session.UserID == normalUser.ID {
+			t.Fatalf("deleted user session still present: %+v", session)
+		}
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/manage/data", nil)
+	req.AddCookie(userCookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("deleted user manage data = %d body=%s, want 401", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAdminDeleteUserRejectsSelfAndAdminAccounts(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
+
+	adminCookie, adminUser := registerTestUser(t, handler, "admin", "admin123")
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/admin/users/"+adminUser.ID, nil)
+	req.AddCookie(adminCookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "cannot_delete_self") {
+		t.Fatalf("admin self delete = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	secondAdmin, err := store.CreateUser("second-admin", "admin123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	for i := range store.state.Users {
+		if store.state.Users[i].ID == secondAdmin.ID {
+			store.state.Users[i].IsAdmin = true
+		}
+	}
+	if err := store.saveLocked(); err != nil {
+		store.mu.Unlock()
+		t.Fatal(err)
+	}
+	store.mu.Unlock()
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodDelete, "/api/admin/users/"+secondAdmin.ID, nil)
+	req.AddCookie(adminCookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "cannot_delete_admin_user") {
+		t.Fatalf("delete other admin = %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestSensitiveKeysAreNotAcceptedFromQueryString(t *testing.T) {
 	store := newTestStore(t)
 	handler := NewServer(Config{APIKey: "global-secret"}, store, discardLogger())
@@ -1680,6 +1782,64 @@ func TestCreateICloudMailboxCreatesForEachSavedSession(t *testing.T) {
 		if !seen {
 			t.Fatalf("account %s did not create mailbox", accountID)
 		}
+	}
+}
+
+func TestCreateICloudMailboxUsesSelectedSavedSessions(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
+	server := handler.(*Server)
+	cookie, user := registerTestUser(t, handler, "selected-create", "multi123")
+	for _, session := range []ICloudSession{
+		{OwnerID: user.ID, AppleID: "first@example.com", DSID: "dsid-first", IsICloudPlus: true, CanCreateHME: true, Cookies: []SessionCookie{{Name: "a", Value: "1"}}},
+		{OwnerID: user.ID, AppleID: "broken@example.com", DSID: "dsid-broken", IsICloudPlus: true, CanCreateHME: true, Cookies: []SessionCookie{{Name: "b", Value: "2"}}},
+		{OwnerID: user.ID, AppleID: "third@example.com", DSID: "dsid-third", IsICloudPlus: true, CanCreateHME: true, Cookies: []SessionCookie{{Name: "c", Value: "3"}}},
+	} {
+		if err := store.SaveICloudSessionForOwner(user.ID, session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sessions := store.ICloudSessionsForOwner(user.ID)
+	selected := []string{sessions[0].AccountID, sessions[2].AccountID}
+	createdAccounts := map[string]bool{}
+	server.createMailboxForOwner = func(ctx context.Context, ownerID, accountID, label, note string) (Mailbox, ICloudRemoteMailbox, error) {
+		if accountID == sessions[1].AccountID {
+			t.Fatalf("broken account %q should not be used", accountID)
+		}
+		createdAccounts[accountID] = true
+		mailbox, err := store.AddMailboxForOwner(ownerID, accountID, label, accountID+"@icloud.com")
+		if err != nil {
+			return Mailbox{}, ICloudRemoteMailbox{}, err
+		}
+		return mailbox, ICloudRemoteMailbox{Email: mailbox.Email, Label: mailbox.Label, IsActive: true}, nil
+	}
+
+	bodyJSON := fmt.Sprintf(`{"label":"SEL","account_ids":["%s","%s"]}`, selected[0], selected[1])
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/icloud/mailboxes/create", strings.NewReader(bodyJSON))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Created   int             `json:"created"`
+		Mailboxes []publicMailbox `json:"mailboxes"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Created != 2 || len(body.Mailboxes) != 2 {
+		t.Fatalf("body = %+v, want two selected mailboxes", body)
+	}
+	for _, accountID := range selected {
+		if !createdAccounts[accountID] {
+			t.Fatalf("selected account %q was not used; created=%+v", accountID, createdAccounts)
+		}
+	}
+	if createdAccounts[sessions[1].AccountID] {
+		t.Fatalf("unselected account %q was used", sessions[1].AccountID)
 	}
 }
 

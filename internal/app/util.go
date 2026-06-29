@@ -54,3 +54,32 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
+func normalizeAccountIDSelection(primary string, values []string) []string {
+	rawValues := make([]string, 0, 1+len(values))
+	rawValues = append(rawValues, primary)
+	rawValues = append(rawValues, values...)
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(rawValues))
+	for _, raw := range rawValues {
+		for _, token := range splitAccountIDTokens(raw) {
+			if _, ok := seen[token]; ok {
+				continue
+			}
+			seen[token] = struct{}{}
+			out = append(out, token)
+		}
+	}
+	return out
+}
+
+func splitAccountIDTokens(value string) []string {
+	return strings.FieldsFunc(value, func(r rune) bool {
+		switch r {
+		case ',', '，', ';', '；', '|', '\n', '\r', '\t', ' ':
+			return true
+		default:
+			return false
+		}
+	})
+}

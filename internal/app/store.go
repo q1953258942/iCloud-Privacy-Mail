@@ -17,6 +17,16 @@ type FileStore struct {
 	state State
 }
 
+type DeleteUserResult struct {
+	UserID         string `json:"user_id"`
+	Username       string `json:"username"`
+	Accounts       int    `json:"accounts"`
+	Mailboxes      int    `json:"mailboxes"`
+	Messages       int    `json:"messages"`
+	ICloudSessions int    `json:"icloud_sessions"`
+	WebSessions    int    `json:"web_sessions"`
+}
+
 func NewFileStore(path string) (*FileStore, error) {
 	if path == "" {
 		path = filepath.Join("data", "state.json")
@@ -133,6 +143,92 @@ func (s *FileStore) UserByID(id string) (User, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.userByIDLocked(id)
+}
+
+func (s *FileStore) DeleteUser(id string) (DeleteUserResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return DeleteUserResult{}, errCode("user_not_found", "账号不存在", false)
+	}
+	idx := -1
+	var user User
+	for i, candidate := range s.state.Users {
+		if candidate.ID == id {
+			idx = i
+			user = candidate
+			break
+		}
+	}
+	if idx < 0 {
+		return DeleteUserResult{}, errCode("user_not_found", "账号不存在", false)
+	}
+	if user.IsAdmin {
+		return DeleteUserResult{}, errCode("cannot_delete_admin_user", "不能删除管理员账号", false)
+	}
+
+	result := DeleteUserResult{
+		UserID:   user.ID,
+		Username: user.Username,
+	}
+	s.state.Users = append(s.state.Users[:idx], s.state.Users[idx+1:]...)
+
+	accounts := s.state.Accounts[:0]
+	for _, account := range s.state.Accounts {
+		if constantTimeEqual(id, account.OwnerID) {
+			result.Accounts++
+			continue
+		}
+		accounts = append(accounts, account)
+	}
+	s.state.Accounts = accounts
+
+	deletedMailboxIDs := make(map[string]struct{})
+	mailboxes := s.state.Mailboxes[:0]
+	for _, mailbox := range s.state.Mailboxes {
+		if constantTimeEqual(id, mailbox.OwnerID) {
+			result.Mailboxes++
+			deletedMailboxIDs[mailbox.ID] = struct{}{}
+			continue
+		}
+		mailboxes = append(mailboxes, mailbox)
+	}
+	s.state.Mailboxes = mailboxes
+
+	messages := s.state.Messages[:0]
+	for _, msg := range s.state.Messages {
+		_, mailboxDeleted := deletedMailboxIDs[msg.MailboxID]
+		if mailboxDeleted || constantTimeEqual(id, msg.OwnerID) {
+			result.Messages++
+			continue
+		}
+		messages = append(messages, msg)
+	}
+	s.state.Messages = messages
+
+	icloudSessions := s.state.ICloudSessions[:0]
+	for _, session := range s.state.ICloudSessions {
+		if constantTimeEqual(id, session.OwnerID) {
+			result.ICloudSessions++
+			continue
+		}
+		icloudSessions = append(icloudSessions, session)
+	}
+	s.state.ICloudSessions = icloudSessions
+
+	webSessions := s.state.WebSessions[:0]
+	for _, session := range s.state.WebSessions {
+		if constantTimeEqual(id, session.UserID) {
+			result.WebSessions++
+			continue
+		}
+		webSessions = append(webSessions, session)
+	}
+	s.state.WebSessions = webSessions
+
+	return result, s.saveLocked()
 }
 
 func (s *FileStore) CreateWebSession(userID string, isAdmin bool, ttl time.Duration) (string, WebSession, error) {

@@ -18,11 +18,11 @@ const (
 )
 
 type mailboxSchedulerConfig struct {
-	AccountID string
-	Label     string
-	Note      string
-	BatchSize int
-	Interval  time.Duration
+	AccountIDs []string
+	Label      string
+	Note       string
+	BatchSize  int
+	Interval   time.Duration
 }
 
 type mailboxSchedulerJob struct {
@@ -38,6 +38,7 @@ type mailboxSchedulerState struct {
 	OwnerID         string
 	Owner           string
 	AccountID       string
+	AccountIDs      []string
 	Label           string
 	Note            string
 	BatchSize       int
@@ -68,6 +69,7 @@ type publicMailboxScheduler struct {
 	Running         bool                          `json:"running"`
 	Owner           string                        `json:"owner,omitempty"`
 	AccountID       string                        `json:"account_id,omitempty"`
+	AccountIDs      []string                      `json:"account_ids,omitempty"`
 	Label           string                        `json:"label,omitempty"`
 	Note            string                        `json:"note,omitempty"`
 	BatchSize       int                           `json:"batch_size"`
@@ -106,12 +108,13 @@ func (s *Server) handleMailboxSchedulerStatus(w http.ResponseWriter, r *http.Req
 
 func (s *Server) handleStartMailboxScheduler(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
-		AccountID       string `json:"account_id"`
-		Label           string `json:"label"`
-		Note            string `json:"note"`
-		BatchSize       int    `json:"batch_size"`
-		IntervalMinutes int    `json:"interval_minutes"`
-		IntervalSeconds int    `json:"interval_seconds"`
+		AccountID       string   `json:"account_id"`
+		AccountIDs      []string `json:"account_ids"`
+		Label           string   `json:"label"`
+		Note            string   `json:"note"`
+		BatchSize       int      `json:"batch_size"`
+		IntervalMinutes int      `json:"interval_minutes"`
+		IntervalSeconds int      `json:"interval_seconds"`
 	}
 	if err := decodeJSON(r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -123,21 +126,24 @@ func (s *Server) handleStartMailboxScheduler(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusUnauthorized, errCode("auth_required", "请先登录账号", false))
 		return
 	}
-	if !s.canAccessAccountIDForOwner(ownerID, payload.AccountID) {
-		writeError(w, http.StatusNotFound, errCode("account_not_found", "账号不存在", false))
-		return
+	accountIDs := normalizeAccountIDSelection(payload.AccountID, payload.AccountIDs)
+	for _, accountID := range accountIDs {
+		if !s.canAccessAccountIDForOwner(ownerID, accountID) {
+			writeError(w, http.StatusNotFound, errCode("account_not_found", "账号不存在", false))
+			return
+		}
 	}
-	if len(s.sessionsForOwner(ownerID, payload.AccountID)) == 0 {
-		writeError(w, http.StatusBadRequest, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先协议登录", true))
+	if len(s.sessionsForOwnerAccounts(ownerID, accountIDs)) == 0 {
+		writeError(w, http.StatusBadRequest, errCode("icloud_session_missing", "未找到可用于创建的 iCloud 登录态，请检查参与账号 ID 或先协议登录", true))
 		return
 	}
 
 	cfg := mailboxSchedulerConfig{
-		AccountID: strings.TrimSpace(payload.AccountID),
-		Label:     strings.TrimSpace(payload.Label),
-		Note:      strings.TrimSpace(payload.Note),
-		BatchSize: payload.BatchSize,
-		Interval:  defaultMailboxSchedulerInterval,
+		AccountIDs: accountIDs,
+		Label:      strings.TrimSpace(payload.Label),
+		Note:       strings.TrimSpace(payload.Note),
+		BatchSize:  payload.BatchSize,
+		Interval:   defaultMailboxSchedulerInterval,
 	}
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = defaultMailboxSchedulerBatchSize
@@ -161,7 +167,8 @@ func (s *Server) handleStartMailboxScheduler(w http.ResponseWriter, r *http.Requ
 			Running:         true,
 			OwnerID:         ownerID,
 			Owner:           s.ownerName(ownerID),
-			AccountID:       cfg.AccountID,
+			AccountID:       strings.Join(cfg.AccountIDs, ","),
+			AccountIDs:      append([]string(nil), cfg.AccountIDs...),
 			Label:           cfg.Label,
 			Note:            cfg.Note,
 			BatchSize:       cfg.BatchSize,
@@ -264,7 +271,7 @@ func (s *Server) runMailboxSchedulerBatch(ctx context.Context, ownerID string, j
 			return
 		}
 		label := schedulerMailboxLabel(cfg.Label, batch, index, cfg.BatchSize)
-		mailboxes, _, failures, err := s.createMailboxesForOwner(ctx, ownerID, cfg.AccountID, label, cfg.Note)
+		mailboxes, _, failures, err := s.createMailboxesForOwner(ctx, ownerID, cfg.AccountIDs, label, cfg.Note)
 		if err != nil && len(mailboxes) == 0 {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return
@@ -321,6 +328,7 @@ func (s *Server) publicMailboxScheduler(r *http.Request) publicMailboxScheduler 
 		Running:         state.Running,
 		Owner:           state.Owner,
 		AccountID:       state.AccountID,
+		AccountIDs:      append([]string(nil), state.AccountIDs...),
 		Label:           state.Label,
 		Note:            state.Note,
 		BatchSize:       state.BatchSize,

@@ -30,7 +30,7 @@
         radial-gradient(circle at 95% 0, rgba(56,189,248,.13), transparent 28%),
         linear-gradient(180deg, #f8fbff 0%, #eef8f6 50%, #f7fbfa 100%);
     }
-    button, select { font: inherit; }
+    button, select, input { font: inherit; }
     .shell { display: grid; grid-template-columns: 238px minmax(0, 1fr); min-height: 100vh; }
     .sidebar {
       position: sticky;
@@ -133,8 +133,14 @@
     }
     .btn:hover { transform: translateY(-1px); border-color: rgba(19,184,166,.5); background: #f3fffb; }
     .btn.primary { border-color: transparent; color: #fff; background: linear-gradient(135deg, #13b8a6, #17c9ae); box-shadow: 0 12px 26px rgba(19,184,166,.18); }
+    .btn.small { padding: 7px 10px; border-radius: 9px; font-size: 12px; }
+    .btn.danger { color: var(--red); border-color: rgba(220,38,38,.3); background: #fff7f7; }
+    .btn.danger:hover { border-color: rgba(220,38,38,.55); background: #fff1f1; }
     main { padding-top: 22px; padding-bottom: 34px; }
+    .view-section { display: none; }
+    .view-section.active { display: block; }
     .stats { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 14px; margin-bottom: 18px; }
+    .stats.view-section.active { display: grid; }
     .stat-card, .panel {
       border: 1px solid var(--line);
       border-radius: 20px;
@@ -188,11 +194,52 @@
       display: flex;
       justify-content: space-between;
       gap: 14px;
+      align-items: center;
       padding: 17px 18px 14px;
       border-bottom: 1px solid var(--line);
       background: linear-gradient(180deg, rgba(255,255,255,.92), rgba(246,252,251,.72));
     }
     .panel-head p { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .panel-tools {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 10px;
+    }
+    .pager {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 800;
+    }
+    .pager .btn { padding: 8px 11px; border-radius: 10px; }
+    .page-size {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .page-size input {
+      width: 76px;
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      background: rgba(255,255,255,.92);
+      color: var(--text);
+      padding: 8px 10px;
+      font-weight: 850;
+      outline: none;
+    }
+    .page-size input:focus {
+      border-color: rgba(19,184,166,.62);
+      box-shadow: 0 0 0 4px rgba(19,184,166,.12);
+    }
     .table-wrap { overflow: auto; }
     table { width: 100%; min-width: 900px; border-collapse: collapse; }
     th, td { border-top: 1px solid rgba(118,143,174,.16); padding: 13px 14px; text-align: left; vertical-align: middle; }
@@ -244,6 +291,8 @@
       .topbar, main { padding-left: 16px; padding-right: 16px; }
       .topbar { align-items: flex-start; flex-direction: column; }
       .actions { justify-content: flex-start; }
+      .panel-head { align-items: flex-start; flex-direction: column; }
+      .panel-tools { justify-content: flex-start; width: 100%; }
       .stats { grid-template-columns: repeat(2, 1fr); }
       .nav { grid-template-columns: 1fr 1fr; }
       h1 { font-size: 28px; }
@@ -259,12 +308,15 @@
         <div>Privacy Mail</div>
       </div>
       <nav class="nav">
-        <button onclick="location.href='/'"><span class="nav-icon">⌂</span>仪表盘</button>
-        <button class="active" onclick="scrollToPanel('accountManagePanel')"><span class="nav-icon">▣</span>账号管理</button>
-        <button onclick="location.href='/'"><span class="nav-icon">✉</span>隐私邮箱</button>
+        <button class="active" data-view="overview" onclick="setActiveView('overview')"><span class="nav-icon">⌂</span>仪表盘</button>
+        <button data-view="accountManage" onclick="setActiveView('accountManage')"><span class="nav-icon">▣</span>账号管理</button>
+        <button data-view="users" onclick="setActiveView('users')"><span class="nav-icon">◉</span>用户列表</button>
+        <button data-view="mailboxes" onclick="setActiveView('mailboxes')"><span class="nav-icon">✉</span>隐私邮箱</button>
+        <button data-view="accounts" onclick="setActiveView('accounts')"><span class="nav-icon">◎</span>登录账号</button>
+        <button data-view="logs" onclick="setActiveView('logs')"><span class="nav-icon">☰</span>运行日志</button>
         <button onclick="refresh()"><span class="nav-icon">↻</span>刷新数据</button>
       </nav>
-      <div class="side-note">点左侧“账号管理”，再点某个网站账号，就能只看这个人的邮箱、登录态和验证码数据。</div>
+      <div class="side-note">左侧切换分类；在“账号管理”点某个网站账号后，其它分类会只显示这个人的数据。</div>
     </aside>
 
     <div class="content">
@@ -296,14 +348,14 @@
       </header>
 
       <main>
-        <section class="stats">
+        <section class="stats view-section active" data-view="overview">
           <div class="stat-card"><strong id="userCount">0</strong><span>用户数</span></div>
           <div class="stat-card"><strong id="accountCount">0</strong><span>登录账号</span></div>
           <div class="stat-card"><strong id="mailboxCount">0</strong><span>隐私邮箱</span></div>
           <div class="stat-card"><strong id="messageCount">0</strong><span>验证码邮件</span></div>
         </section>
 
-        <section class="panel" id="accountManagePanel">
+        <section class="panel view-section" id="accountManagePanel" data-view="accountManage">
           <div class="panel-head">
             <div>
               <h2>网站账号管理</h2>
@@ -315,22 +367,33 @@
           <div class="empty" id="accountCardsEmpty" hidden>暂无账号数据</div>
         </section>
 
-        <section class="panel" id="usersPanel">
+        <section class="panel view-section" id="usersPanel" data-view="users">
           <div class="panel-head">
             <div><h2>用户列表</h2><p>管理员显示全部用户；普通用户只显示自己。</p></div>
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>ID</th><th>账号</th><th>角色</th><th>状态</th><th>创建时间</th><th>最后登录</th></tr></thead>
+              <thead><tr><th>ID</th><th>账号</th><th>角色</th><th>状态</th><th>创建时间</th><th>最后登录</th><th>操作</th></tr></thead>
               <tbody id="users"></tbody>
             </table>
           </div>
           <div class="empty" id="usersEmpty" hidden>暂无用户数据</div>
         </section>
 
-        <section class="panel" id="mailboxesPanel">
+        <section class="panel view-section" id="mailboxesPanel" data-view="mailboxes">
           <div class="panel-head">
             <div><h2>隐私邮箱数据</h2><p>当前账号有权限查看的隐私邮箱。</p></div>
+            <div class="panel-tools">
+              <label class="page-size">每页
+                <input id="mailboxPageSize" type="number" min="1" max="500" value="10" onchange="setMailboxPageSize(this.value)" onkeydown="if(event.key === 'Enter') setMailboxPageSize(this.value)">
+                条
+              </label>
+              <div class="pager">
+                <button class="btn" id="mailboxPrevPage" onclick="changeMailboxPage(-1)">上一页</button>
+                <span id="mailboxPageInfo">第 1/1 页 · 0-0/0</span>
+                <button class="btn" id="mailboxNextPage" onclick="changeMailboxPage(1)">下一页</button>
+              </div>
+            </div>
           </div>
           <div class="table-wrap">
             <table>
@@ -341,7 +404,7 @@
           <div class="empty" id="mailboxesEmpty" hidden>暂无隐私邮箱数据</div>
         </section>
 
-        <section class="panel" id="accountsPanel">
+        <section class="panel view-section" id="accountsPanel" data-view="accounts">
           <div class="panel-head">
             <div><h2>登录账号数据</h2><p>已保存的 Apple/iCloud 登录账号标签。</p></div>
           </div>
@@ -354,7 +417,7 @@
           <div class="empty" id="accountsEmpty" hidden>暂无登录账号数据</div>
         </section>
 
-        <section class="panel">
+        <section class="panel view-section" data-view="logs">
           <div class="panel-head">
             <div><h2>运行日志</h2><p>最近操作。</p></div>
           </div>
@@ -369,6 +432,19 @@
     let currentUser = null;
     let manageData = null;
     let selectedOwner = 'all';
+    const viewStorageKey = 'ipm_manage_active_view';
+    const mailboxPageSizeStorage = 'ipm_manage_mailbox_page_size';
+    const defaultMailboxPageSize = 10;
+    let mailboxPage = 1;
+    let mailboxPageSize = defaultMailboxPageSize;
+    const viewMeta = {
+      overview: '仪表盘',
+      accountManage: '账号管理',
+      users: '用户列表',
+      mailboxes: '隐私邮箱',
+      accounts: '登录账号',
+      logs: '运行日志'
+    };
 
     function esc(value) {
       return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -391,6 +467,26 @@
       const el = $(id);
       if (el) el.scrollIntoView({behavior:'smooth', block:'start'});
     }
+    function setActiveView(view) {
+      const normalized = viewMeta[view] ? view : 'overview';
+      for (const button of document.querySelectorAll('.nav button[data-view]')) {
+        button.classList.toggle('active', button.dataset.view === normalized);
+      }
+      for (const section of document.querySelectorAll('.view-section[data-view]')) {
+        section.classList.toggle('active', section.dataset.view === normalized);
+      }
+      try {
+        localStorage.setItem(viewStorageKey, normalized);
+      } catch (_) {}
+      window.scrollTo({top: 0, behavior: 'smooth'});
+    }
+    function initViewNavigation() {
+      let saved = 'overview';
+      try {
+        saved = localStorage.getItem(viewStorageKey) || 'overview';
+      } catch (_) {}
+      setActiveView(saved);
+    }
     function ownerID(row) {
       return String(row && row.owner_id != null ? row.owner_id : '');
     }
@@ -404,10 +500,37 @@
     }
     function selectOwner(owner) {
       selectedOwner = owner;
+      mailboxPage = 1;
       renderData();
       const label = selectedOwner === 'all' ? '全部账号' : ($('currentScope').textContent || selectedOwner);
       log('已切换查看：' + label);
       scrollToPanel('accountManagePanel');
+    }
+    function normalizeMailboxPageSize(value) {
+      const parsed = Number.parseInt(value, 10);
+      if (!Number.isFinite(parsed) || parsed < 1) return defaultMailboxPageSize;
+      return Math.min(parsed, 500);
+    }
+    function initMailboxPagination() {
+      try {
+        mailboxPageSize = normalizeMailboxPageSize(localStorage.getItem(mailboxPageSizeStorage) || defaultMailboxPageSize);
+      } catch (_) {
+        mailboxPageSize = defaultMailboxPageSize;
+      }
+      if ($('mailboxPageSize')) $('mailboxPageSize').value = String(mailboxPageSize);
+    }
+    function setMailboxPageSize(value) {
+      mailboxPageSize = normalizeMailboxPageSize(value);
+      mailboxPage = 1;
+      if ($('mailboxPageSize')) $('mailboxPageSize').value = String(mailboxPageSize);
+      try {
+        localStorage.setItem(mailboxPageSizeStorage, String(mailboxPageSize));
+      } catch (_) {}
+      renderData();
+    }
+    function changeMailboxPage(delta) {
+      mailboxPage += delta;
+      renderData();
     }
     async function api(path, options={}) {
       const res = await fetch(path, {credentials:'same-origin', headers:{'content-type':'application/json', ...(options.headers || {})}, ...options});
@@ -431,6 +554,18 @@
       manageData = await api('/api/manage/data');
       renderData();
       log('数据已刷新');
+    }
+    async function deleteUser(id) {
+      if (!currentUser || !currentUser.is_admin) return;
+      if (!id || id === currentUser.id) return;
+      const user = (manageData && manageData.users || []).find(u => u.id === id) || {};
+      const name = user.username || id;
+      if (!confirm(`确定删除账号「${name}」吗？该账号的登录态、隐私邮箱和验证码邮件也会一并删除。`)) return;
+      const data = await api('/api/admin/users/' + encodeURIComponent(id), {method:'DELETE'});
+      if (selectedOwner === id) selectedOwner = 'all';
+      await refresh();
+      const deleted = data.deleted || {};
+      log(`已删除账号：${name}；清理邮箱 ${deleted.mailboxes || 0} 个，验证码 ${deleted.messages || 0} 封`);
     }
     function renderData() {
       const data = manageData || {};
@@ -500,20 +635,11 @@
           <td>${statusPill(u.status)}</td>
           <td>${esc(u.created_at || '-')}</td>
           <td>${esc(u.last_login_at || '-')}</td>
+          <td>${currentUser && currentUser.is_admin && !u.is_admin && u.id !== currentUser.id ? `<button class="btn small danger" onclick="deleteUser('${esc(u.id)}')">删除</button>` : '-'}</td>
         </tr>`).join('');
       renderEmpty('users', usersInScope);
 
-      $('mailboxes').innerHTML = mailboxes.map(m => `
-        <tr>
-          <td class="mono">${esc(m.id)}</td>
-          <td>${esc(m.owner || '-')}</td>
-          <td>${esc(m.label || '-')}</td>
-          <td><span class="email">${esc(m.email || '-')}</span></td>
-          <td>${statusPill(m.status)}</td>
-          <td>${m.receive_count || 0}</td>
-          <td>${esc(m.created_at || '-')}</td>
-        </tr>`).join('');
-      renderEmpty('mailboxes', mailboxes);
+      renderMailboxRows(mailboxes);
 
       $('accounts').innerHTML = accounts.map(a => `
         <tr>
@@ -527,6 +653,33 @@
         </tr>`).join('');
       renderEmpty('accounts', accounts);
       renderMailboxExportAccountOptions(accounts, mailboxes);
+    }
+    function renderMailboxRows(mailboxes) {
+      const totalRows = mailboxes.length;
+      const totalPages = Math.max(1, Math.ceil(totalRows / mailboxPageSize));
+      mailboxPage = Math.max(1, Math.min(mailboxPage, totalPages));
+      const start = (mailboxPage - 1) * mailboxPageSize;
+      const pageRows = mailboxes.slice(start, start + mailboxPageSize);
+      const rangeStart = totalRows === 0 ? 0 : start + 1;
+      const rangeEnd = Math.min(start + mailboxPageSize, totalRows);
+
+      if ($('mailboxPageInfo')) {
+        $('mailboxPageInfo').textContent = `第 ${mailboxPage}/${totalPages} 页 · ${rangeStart}-${rangeEnd}/${totalRows}`;
+      }
+      if ($('mailboxPrevPage')) $('mailboxPrevPage').disabled = mailboxPage <= 1;
+      if ($('mailboxNextPage')) $('mailboxNextPage').disabled = mailboxPage >= totalPages;
+
+      $('mailboxes').innerHTML = pageRows.map(m => `
+        <tr>
+          <td class="mono">${esc(m.id)}</td>
+          <td>${esc(m.owner || '-')}</td>
+          <td>${esc(m.label || '-')}</td>
+          <td><span class="email">${esc(m.email || '-')}</span></td>
+          <td>${statusPill(m.status)}</td>
+          <td>${m.receive_count || 0}</td>
+          <td>${esc(m.created_at || '-')}</td>
+        </tr>`).join('');
+      renderEmpty('mailboxes', mailboxes);
     }
     async function exportData() {
       const res = await fetch('/api/runtime/export', {credentials:'same-origin'});
@@ -685,6 +838,8 @@
       location.href = '/login';
     }
 
+    initViewNavigation();
+    initMailboxPagination();
     ensureAuth().then(refresh).catch(err => log(err.message));
   </script>
 </body>

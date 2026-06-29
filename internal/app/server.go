@@ -132,6 +132,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/auth/register", s.handleAuthRegister)
 	s.mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
 	s.mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
+	s.mux.HandleFunc("DELETE /api/admin/users/{id}", s.handleAdminDeleteUser)
 	s.mux.HandleFunc("GET /api/status", s.handleStatus)
 	s.mux.HandleFunc("GET /api/manage/data", s.handleManageData)
 	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
@@ -257,6 +258,38 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	s.clearSessionCookie(w, r)
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+func (s *Server) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
+	session, currentUser, ok := s.currentWebSession(r)
+	if !ok || (!session.IsAdmin && !currentUser.IsAdmin) {
+		writeError(w, http.StatusForbidden, errCode("admin_required", "需要管理员权限", false))
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, errCode("user_id_missing", "缺少账号 ID", false))
+		return
+	}
+	if constantTimeEqual(currentUser.ID, id) {
+		writeError(w, http.StatusBadRequest, errCode("cannot_delete_self", "不能删除当前登录的管理员账号", false))
+		return
+	}
+	user, ok := s.store.UserByID(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, errCode("user_not_found", "账号不存在", false))
+		return
+	}
+	if user.IsAdmin {
+		writeError(w, http.StatusBadRequest, errCode("cannot_delete_admin_user", "不能删除管理员账号", false))
+		return
+	}
+	result, err := s.store.DeleteUser(id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "deleted": result})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -805,20 +838,22 @@ func (s *Server) handleSubmitICloudProtocol2FA(w http.ResponseWriter, r *http.Re
 
 func (s *Server) handleCreateICloudMailbox(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
-		AccountID string `json:"account_id"`
-		Label     string `json:"label"`
-		Note      string `json:"note"`
+		AccountID  string   `json:"account_id"`
+		AccountIDs []string `json:"account_ids"`
+		Label      string   `json:"label"`
+		Note       string   `json:"note"`
 	}
 	if err := decodeJSON(r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if !s.canAccessAccountID(r, payload.AccountID) {
+	accountIDs := normalizeAccountIDSelection(payload.AccountID, payload.AccountIDs)
+	if !s.canAccessAccountIDs(r, accountIDs) {
 		writeError(w, http.StatusNotFound, errCode("account_not_found", "账号不存在", false))
 		return
 	}
 	ownerID := requestOwnerID(r, s.store)
-	mailboxes, remotes, failures, err := s.createMailboxesForOwner(r.Context(), ownerID, payload.AccountID, payload.Label, payload.Note)
+	mailboxes, remotes, failures, err := s.createMailboxesForOwner(r.Context(), ownerID, accountIDs, payload.Label, payload.Note)
 	if err != nil && len(mailboxes) == 0 {
 		s.logICloudCreateError(ownerID, err)
 		writeError(w, http.StatusBadGateway, err)
@@ -1864,17 +1899,18 @@ func (s *Server) createICloudMailboxForOwner(ctx context.Context, ownerID, accou
 	return mailbox, remote, nil
 }
 
-func (s *Server) createMailboxesForOwner(ctx context.Context, ownerID, accountID, label, note string) ([]Mailbox, []ICloudRemoteMailbox, []createMailboxFailure, error) {
-	sessions := s.sessionsForOwner(ownerID, accountID)
+func (s *Server) createMailboxesForOwner(ctx context.Context, ownerID string, accountIDs []string, label, note string) ([]Mailbox, []ICloudRemoteMailbox, []createMailboxFailure, error) {
+	accountIDs = normalizeAccountIDSelection("", accountIDs)
+	sessions := s.sessionsForOwnerAccounts(ownerID, accountIDs)
 	if len(sessions) == 0 {
-		return nil, nil, nil, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先协议登录", true)
+		return nil, nil, nil, errCode("icloud_session_missing", "未找到可用于创建的 iCloud 登录态，请检查参与账号 ID 或先协议登录", true)
 	}
 	mailboxes := make([]Mailbox, 0, len(sessions))
 	remotes := make([]ICloudRemoteMailbox, 0, len(sessions))
 	failures := make([]createMailboxFailure, 0)
 	var firstErr error
 	for _, session := range sessions {
-		effectiveAccountID := firstNonEmpty(strings.TrimSpace(accountID), session.AccountID)
+		effectiveAccountID := session.AccountID
 		mailbox, remote, err := s.createMailboxForOwner(ctx, ownerID, effectiveAccountID, label, note)
 		if err != nil {
 			if firstErr == nil {
@@ -2065,6 +2101,20 @@ func (s *Server) sessionsForOwner(ownerID, accountID string) []ICloudSession {
 	return s.store.ICloudSessionsForOwner("")
 }
 
+func (s *Server) sessionsForOwnerAccounts(ownerID string, accountIDs []string) []ICloudSession {
+	accountIDs = normalizeAccountIDSelection("", accountIDs)
+	if len(accountIDs) == 0 {
+		return s.sessionsForOwner(ownerID, "")
+	}
+	sessions := make([]ICloudSession, 0, len(accountIDs))
+	for _, accountID := range accountIDs {
+		if session, ok := s.sessionForOwnerAccount(ownerID, accountID); ok {
+			sessions = append(sessions, session)
+		}
+	}
+	return sessions
+}
+
 func (s *Server) sessionForMailbox(ownerID, accountID string) (ICloudSession, bool) {
 	if session, ok := s.sessionForOwnerAccount(ownerID, accountID); ok {
 		return session, true
@@ -2221,6 +2271,15 @@ func (s *Server) canAccessAccountID(r *http.Request, id string) bool {
 		}
 	}
 	return false
+}
+
+func (s *Server) canAccessAccountIDs(r *http.Request, ids []string) bool {
+	for _, id := range normalizeAccountIDSelection("", ids) {
+		if !s.canAccessAccountID(r, id) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) canAccessAccountIDForOwner(ownerID, id string) bool {
