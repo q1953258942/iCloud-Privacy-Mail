@@ -22,14 +22,15 @@ const (
 )
 
 type State struct {
-	NextID         int             `json:"next_id"`
-	Users          []User          `json:"users,omitempty"`
-	WebSessions    []WebSession    `json:"web_sessions,omitempty"`
-	Accounts       []Account       `json:"accounts"`
-	Mailboxes      []Mailbox       `json:"mailboxes"`
-	Messages       []Message       `json:"messages"`
-	ICloudSession  *ICloudSession  `json:"icloud_session,omitempty"`
-	ICloudSessions []ICloudSession `json:"icloud_sessions,omitempty"`
+	NextID         int              `json:"next_id"`
+	Users          []User           `json:"users,omitempty"`
+	WebSessions    []WebSession     `json:"web_sessions,omitempty"`
+	Accounts       []Account        `json:"accounts"`
+	Mailboxes      []Mailbox        `json:"mailboxes"`
+	Messages       []Message        `json:"messages"`
+	ICloudSession  *ICloudSession   `json:"icloud_session,omitempty"`
+	ICloudSessions []ICloudSession  `json:"icloud_sessions,omitempty"`
+	CreateSettings []CreateSettings `json:"create_settings,omitempty"`
 }
 
 const (
@@ -141,6 +142,18 @@ type LoginState struct {
 	LastCheckedAt     time.Time       `json:"last_checked_at,omitempty"`
 	LastCheckOK       bool            `json:"last_check_ok,omitempty"`
 	LastStatusMessage string          `json:"last_status_message,omitempty"`
+}
+
+type CreateSettings struct {
+	OwnerID                       string    `json:"owner_id,omitempty"`
+	Label                         string    `json:"label,omitempty"`
+	Note                          string    `json:"note,omitempty"`
+	AccountIDs                    []string  `json:"account_ids,omitempty"`
+	CreateChannel                 string    `json:"create_channel,omitempty"`
+	SchedulerCreateChannel        string    `json:"scheduler_create_channel,omitempty"`
+	SchedulerIntervalMinutes      int       `json:"scheduler_interval_minutes,omitempty"`
+	SchedulerRoundIntervalSeconds int       `json:"scheduler_round_interval_seconds,omitempty"`
+	UpdatedAt                     time.Time `json:"updated_at,omitempty"`
 }
 
 func (a *Account) UnmarshalJSON(data []byte) error {

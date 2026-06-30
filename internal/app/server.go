@@ -57,6 +57,7 @@ type createMailboxFailure struct {
 	AccountID string `json:"account_id,omitempty"`
 	AppleID   string `json:"apple_id,omitempty"`
 	Channel   string `json:"channel,omitempty"`
+	Code      string `json:"code,omitempty"`
 	Error     string `json:"error"`
 }
 
@@ -187,6 +188,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
 	s.mux.HandleFunc("DELETE /api/admin/users/{id}", s.handleAdminDeleteUser)
 	s.mux.HandleFunc("GET /api/status", s.handleStatus)
+	s.mux.HandleFunc("GET /api/create-settings", s.handleCreateSettings)
+	s.mux.HandleFunc("POST /api/create-settings", s.handleSaveCreateSettings)
 	s.mux.HandleFunc("GET /api/manage/data", s.handleManageData)
 	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	s.mux.HandleFunc("POST /api/v1/mailboxes/claim", s.handleClaimMailbox)
@@ -233,6 +236,64 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleManagePage(w http.ResponseWriter, _ *http.Request) {
 	s.writeTemplate(w, "templates/manage.html")
+}
+
+func (s *Server) handleCreateSettings(w http.ResponseWriter, r *http.Request) {
+	ownerID := requestOwnerID(r, s.store)
+	if ownerID == "" {
+		writeError(w, http.StatusUnauthorized, errCode("auth_required", "请先登录账号", false))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":  true,
+		"settings": publicCreateSettings(s.store.CreateSettingsForOwner(ownerID)),
+	})
+}
+
+func (s *Server) handleSaveCreateSettings(w http.ResponseWriter, r *http.Request) {
+	ownerID := requestOwnerID(r, s.store)
+	if ownerID == "" {
+		writeError(w, http.StatusUnauthorized, errCode("auth_required", "请先登录账号", false))
+		return
+	}
+	var payload struct {
+		Label                         string   `json:"label"`
+		Note                          string   `json:"note"`
+		AccountIDs                    []string `json:"account_ids"`
+		CreateChannel                 string   `json:"create_channel"`
+		SchedulerCreateChannel        string   `json:"scheduler_create_channel"`
+		SchedulerIntervalMinutes      int      `json:"scheduler_interval_minutes"`
+		SchedulerRoundIntervalSeconds int      `json:"scheduler_round_interval_seconds"`
+	}
+	if err := decodeJSON(r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	accountIDs := normalizeAccountIDSelection("", payload.AccountIDs)
+	for _, accountID := range accountIDs {
+		if !s.canAccessAccountIDForOwner(ownerID, accountID) {
+			writeError(w, http.StatusNotFound, errCode("account_not_found", "账号不存在，配置未保存", false))
+			return
+		}
+	}
+	settings, err := s.store.SaveCreateSettingsForOwner(ownerID, CreateSettings{
+		Label:                         payload.Label,
+		Note:                          payload.Note,
+		AccountIDs:                    accountIDs,
+		CreateChannel:                 payload.CreateChannel,
+		SchedulerCreateChannel:        payload.SchedulerCreateChannel,
+		SchedulerIntervalMinutes:      payload.SchedulerIntervalMinutes,
+		SchedulerRoundIntervalSeconds: payload.SchedulerRoundIntervalSeconds,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":  true,
+		"message":  "创建配置已保存到服务器",
+		"settings": publicCreateSettings(settings),
+	})
 }
 
 func (s *Server) writeTemplate(w http.ResponseWriter, name string) {
@@ -1040,10 +1101,11 @@ func (s *Server) handleSubmitAppleAccount2FA(w http.ResponseWriter, r *http.Requ
 
 func (s *Server) handleCreateICloudMailbox(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
-		AccountID  string   `json:"account_id"`
-		AccountIDs []string `json:"account_ids"`
-		Label      string   `json:"label"`
-		Note       string   `json:"note"`
+		AccountID     string   `json:"account_id"`
+		AccountIDs    []string `json:"account_ids"`
+		Label         string   `json:"label"`
+		Note          string   `json:"note"`
+		CreateChannel string   `json:"create_channel"`
 	}
 	if err := decodeJSON(r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -1055,7 +1117,12 @@ func (s *Server) handleCreateICloudMailbox(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	ownerID := requestOwnerID(r, s.store)
-	mailboxes, remotes, failures, err := s.createMailboxesForOwner(r.Context(), ownerID, accountIDs, payload.Label, payload.Note)
+	channel := normalizeMailboxCreateChannel(mailboxCreateChannel(strings.ToLower(strings.TrimSpace(payload.CreateChannel))))
+	requests := make([]mailboxCreateRequest, 0, len(accountIDs))
+	for _, accountID := range accountIDs {
+		requests = append(requests, mailboxCreateRequest{AccountID: accountID, Channel: channel})
+	}
+	mailboxes, remotes, failures, err := s.createMailboxesForOwnerWithChannels(r.Context(), ownerID, requests, payload.Label, payload.Note)
 	if err != nil {
 		s.logICloudCreateError(ownerID, err)
 		if len(mailboxes) == 0 && len(failures) == 0 {
@@ -2167,10 +2234,15 @@ func (s *Server) createMailboxesForOwnerWithChannels(ctx context.Context, ownerI
 			if firstErr == nil {
 				firstErr = result.err
 			}
+			var coded codedError
+			if !errors.As(result.err, &coded) {
+				coded = codedError{}
+			}
 			failures = append(failures, createMailboxFailure{
 				AccountID: result.accountID,
 				AppleID:   strings.TrimSpace(result.session.AppleID),
 				Channel:   string(result.channel),
+				Code:      strings.TrimSpace(coded.code),
 				Error:     result.err.Error(),
 			})
 			continue
@@ -2528,6 +2600,24 @@ func (s *Server) publicSessionsForRequest(r *http.Request) []publicICloudSession
 	return s.publicSessionsForOwner(requestOwnerID(r, s.store))
 }
 
+func publicCreateSettings(settings CreateSettings) map[string]any {
+	settings = normalizeCreateSettings(settings.OwnerID, settings)
+	createChannel := normalizeMailboxCreateChannel(mailboxCreateChannel(settings.CreateChannel))
+	schedulerChannel := normalizeMailboxCreateChannel(mailboxCreateChannel(settings.SchedulerCreateChannel))
+	return map[string]any{
+		"label":                            settings.Label,
+		"note":                             settings.Note,
+		"account_ids":                      append([]string(nil), settings.AccountIDs...),
+		"create_channel":                   string(createChannel),
+		"create_channel_label":             mailboxCreateChannelLabel(createChannel),
+		"scheduler_create_channel":         string(schedulerChannel),
+		"scheduler_create_channel_label":   mailboxCreateChannelLabel(schedulerChannel),
+		"scheduler_interval_minutes":       settings.SchedulerIntervalMinutes,
+		"scheduler_round_interval_seconds": settings.SchedulerRoundIntervalSeconds,
+		"updated_at":                       formatTime(settings.UpdatedAt),
+	}
+}
+
 func (s *Server) publicSessionsForOwner(ownerID string) []publicICloudSession {
 	sessions := s.sessionsForOwner(ownerID, "")
 	out := make([]publicICloudSession, 0, len(sessions))
@@ -2578,6 +2668,9 @@ func (s *Server) allowsUserSession(r *http.Request) bool {
 	if r.Method == http.MethodGet && r.URL.Path == "/api/status" {
 		return true
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/api/create-settings" {
+		return true
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/api/manage/data" {
 		return true
 	}
@@ -2595,7 +2688,8 @@ func (s *Server) allowsUserSession(r *http.Request) bool {
 	}
 	if r.Method == http.MethodPost {
 		switch r.URL.Path {
-		case "/api/icloud/protocol-login/start",
+		case "/api/create-settings",
+			"/api/icloud/protocol-login/start",
 			"/api/icloud/protocol-login/2fa",
 			"/api/apple-account/login/start",
 			"/api/apple-account/login/2fa",

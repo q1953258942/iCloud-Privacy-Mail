@@ -23,6 +23,7 @@ type mailboxSchedulerConfig struct {
 	AccountIDs    []string
 	Label         string
 	Note          string
+	CreateChannel mailboxCreateChannel
 	BatchSize     int
 	Interval      time.Duration
 	RoundInterval time.Duration
@@ -44,6 +45,7 @@ type mailboxSchedulerState struct {
 	AccountIDs           []string
 	Label                string
 	Note                 string
+	CreateChannel        mailboxCreateChannel
 	BatchSize            int
 	IntervalSeconds      int
 	RoundIntervalSeconds int
@@ -76,6 +78,8 @@ type publicMailboxScheduler struct {
 	AccountIDs           []string                      `json:"account_ids,omitempty"`
 	Label                string                        `json:"label,omitempty"`
 	Note                 string                        `json:"note,omitempty"`
+	CreateChannel        string                        `json:"create_channel,omitempty"`
+	CreateChannelLabel   string                        `json:"create_channel_label,omitempty"`
 	BatchSize            int                           `json:"batch_size"`
 	IntervalSeconds      int                           `json:"interval_seconds"`
 	IntervalMinutes      int                           `json:"interval_minutes"`
@@ -117,6 +121,7 @@ func (s *Server) handleStartMailboxScheduler(w http.ResponseWriter, r *http.Requ
 		AccountIDs           []string `json:"account_ids"`
 		Label                string   `json:"label"`
 		Note                 string   `json:"note"`
+		CreateChannel        string   `json:"create_channel"`
 		BatchSize            int      `json:"batch_size"`
 		IntervalMinutes      int      `json:"interval_minutes"`
 		IntervalSeconds      int      `json:"interval_seconds"`
@@ -148,6 +153,7 @@ func (s *Server) handleStartMailboxScheduler(w http.ResponseWriter, r *http.Requ
 		AccountIDs:    accountIDs,
 		Label:         strings.TrimSpace(payload.Label),
 		Note:          strings.TrimSpace(payload.Note),
+		CreateChannel: normalizeMailboxCreateChannel(mailboxCreateChannel(strings.ToLower(strings.TrimSpace(payload.CreateChannel)))),
 		BatchSize:     defaultMailboxSchedulerBatchSize,
 		Interval:      defaultMailboxSchedulerInterval,
 		RoundInterval: defaultMailboxSchedulerRoundInterval,
@@ -178,6 +184,7 @@ func (s *Server) handleStartMailboxScheduler(w http.ResponseWriter, r *http.Requ
 			AccountIDs:           append([]string(nil), cfg.AccountIDs...),
 			Label:                cfg.Label,
 			Note:                 cfg.Note,
+			CreateChannel:        cfg.CreateChannel,
 			BatchSize:            cfg.BatchSize,
 			IntervalSeconds:      int(cfg.Interval.Round(time.Second).Seconds()),
 			RoundIntervalSeconds: int(cfg.RoundInterval.Round(time.Second).Seconds()),
@@ -298,8 +305,10 @@ func (s *Server) runMailboxSchedulerBatch(ctx context.Context, ownerID string, j
 			}
 		}
 	}
-	accountChannels := s.schedulerCreateChannelsByAccount(ownerID, batchAccountIDs)
+	accountChannels := s.schedulerCreateChannelsByAccount(ownerID, batchAccountIDs, cfg.CreateChannel)
 	disabledChannels := make(map[string]map[mailboxCreateChannel]bool)
+	oneShotNextChannels := make(map[string]mailboxCreateChannel)
+	transientRetriedChannels := make(map[string]map[mailboxCreateChannel]bool)
 	skippedThisBatch := make(map[string]bool)
 	for _, accountID := range batchAccountIDs {
 		accountID = strings.TrimSpace(accountID)
@@ -307,7 +316,7 @@ func (s *Server) runMailboxSchedulerBatch(ctx context.Context, ownerID string, j
 			continue
 		}
 		skippedThisBatch[accountID] = true
-		message := "未保存新接口或旧接口登录态"
+		message := schedulerMissingLoginStateMessage(cfg.CreateChannel)
 		job.mu.Lock()
 		job.state.Failed++
 		job.state.LastError = message
@@ -318,7 +327,7 @@ func (s *Server) runMailboxSchedulerBatch(ctx context.Context, ownerID string, j
 		if ctx.Err() != nil {
 			return
 		}
-		activeRequests := activeSchedulerCreateRequests(batchAccountIDs, accountChannels, disabledChannels, skippedThisBatch)
+		activeRequests := activeSchedulerCreateRequests(batchAccountIDs, accountChannels, disabledChannels, skippedThisBatch, oneShotNextChannels)
 		if len(activeRequests) == 0 {
 			job.mu.Lock()
 			job.addEventLocked("skipped", fmt.Sprintf("第 %d 次定时创建剩余账号都已临时跳过，下一次定时创建会重新尝试", batch), batch, Mailbox{}, nil)
@@ -348,6 +357,10 @@ func (s *Server) runMailboxSchedulerBatch(ctx context.Context, ownerID string, j
 			if mailboxIndex < len(remotes) {
 				channel = mailboxCreateChannelFromRemote(remotes[mailboxIndex])
 			}
+			if accountID := strings.TrimSpace(mailbox.AccountID); accountID != "" {
+				delete(oneShotNextChannels, accountID)
+				delete(transientRetriedChannels, accountID)
+			}
 			job.addEventLocked("created", schedulerMailboxCreatedMessage(index, s.schedulerMailboxAccountLabel(mailbox.AccountID), channel, mailbox.Email), batch, mailbox, nil)
 		}
 		if len(failures) > 0 {
@@ -358,23 +371,46 @@ func (s *Server) runMailboxSchedulerBatch(ctx context.Context, ownerID string, j
 				if channel == mailboxCreateChannelAuto {
 					channel = activeRequestChannel(activeRequests, accountID)
 				}
-				if accountID != "" && channel != mailboxCreateChannelAuto {
+				oneShotChannel := oneShotNextChannels[accountID]
+				wasOneShot := normalizeMailboxCreateChannel(oneShotChannel) == channel && channel != mailboxCreateChannelAuto
+				delete(oneShotNextChannels, accountID)
+				if accountID != "" && channel != mailboxCreateChannelAuto && !schedulerTransientCreateFailure(failure) {
 					disableSchedulerCreateChannel(disabledChannels, accountID, channel)
 				}
 				if accountID != "" {
-					if nextChannel, ok := nextSchedulerCreateChannel(accountChannels[accountID], disabledChannels[accountID]); ok {
+					if schedulerTransientCreateFailure(failure) {
+						if !schedulerTransientCreateRetried(transientRetriedChannels, accountID, channel) {
+							markSchedulerTransientCreateRetried(transientRetriedChannels, accountID, channel)
+							oneShotNextChannels[accountID] = channel
+							job.state.LastError = failure.Error
+							job.addEventLocked("channel_failed", schedulerChannelRetryMessage(index, accountLabel, channel, failure.Error), batch, Mailbox{}, errors.New(failure.Error))
+							continue
+						}
+						disableSchedulerCreateChannel(disabledChannels, accountID, channel)
+						if nextChannel, ok := nextSchedulerCreateChannelAfter(accountChannels[accountID], disabledChannels[accountID], channel); ok {
+							oneShotNextChannels[accountID] = nextChannel
+							job.state.LastError = failure.Error
+							job.addEventLocked("channel_failed", schedulerChannelFailedMessage(index, accountLabel, channel, failure.Error, nextChannel), batch, Mailbox{}, errors.New(failure.Error))
+							continue
+						}
+						skippedThisBatch[accountID] = true
+					} else if wasOneShot {
+						disableSchedulerCreateChannel(disabledChannels, accountID, channel)
+						skippedThisBatch[accountID] = true
+					} else if nextChannel, ok := nextSchedulerCreateChannel(accountChannels[accountID], disabledChannels[accountID]); ok {
 						job.state.LastError = failure.Error
 						job.addEventLocked("channel_failed", schedulerChannelFailedMessage(index, accountLabel, channel, failure.Error, nextChannel), batch, Mailbox{}, errors.New(failure.Error))
 						continue
+					} else {
+						skippedThisBatch[accountID] = true
 					}
-					skippedThisBatch[accountID] = true
 				}
 				job.state.Failed++
 				job.state.LastError = failure.Error
 				job.addEventLocked("failed", schedulerAccountFailedMessage(index, accountLabel, channel, failure.Error), batch, Mailbox{}, errors.New(failure.Error))
 			}
 		}
-		hasNextRound := len(activeSchedulerCreateRequests(batchAccountIDs, accountChannels, disabledChannels, skippedThisBatch)) > 0
+		hasNextRound := len(activeSchedulerCreateRequests(batchAccountIDs, accountChannels, disabledChannels, skippedThisBatch, oneShotNextChannels)) > 0
 		job.mu.Unlock()
 		if hasNextRound {
 			if err := waitMailboxSchedulerRoundInterval(ctx, cfg.RoundInterval); err != nil {
@@ -400,6 +436,17 @@ func waitMailboxSchedulerRoundInterval(ctx context.Context, interval time.Durati
 
 func schedulerBatchStartedMessage(batch int) string {
 	return fmt.Sprintf("开始第 %d 次定时创建：勾选账号同时创建，失败账号本轮临时跳过，直到全部临时失败后等待下次", batch)
+}
+
+func schedulerMissingLoginStateMessage(channel mailboxCreateChannel) string {
+	switch normalizeMailboxCreateChannel(channel) {
+	case mailboxCreateChannelAppleAccount:
+		return "未保存新接口登录态"
+	case mailboxCreateChannelICloudWeb:
+		return "未保存旧接口登录态"
+	default:
+		return "未保存新接口或旧接口登录态"
+	}
 }
 
 func schedulerBatchFailedMessage(index int, message string) string {
@@ -433,6 +480,14 @@ func schedulerChannelFailedMessage(index int, account string, channel mailboxCre
 	return fmt.Sprintf("第 %d 轮%s使用%s创建失败：%s；本轮切换%s继续尝试", index, account, mailboxCreateChannelLabel(channel), message, mailboxCreateChannelLabel(nextChannel))
 }
 
+func schedulerChannelRetryMessage(index int, account string, channel mailboxCreateChannel, message string) string {
+	account = strings.TrimSpace(account)
+	if account == "" {
+		account = "未知账号"
+	}
+	return fmt.Sprintf("第 %d 轮%s使用%s创建失败：%s；下轮重试%s", index, account, mailboxCreateChannelLabel(channel), message, mailboxCreateChannelLabel(channel))
+}
+
 func mailboxCreateChannelFromRemote(remote ICloudRemoteMailbox) mailboxCreateChannel {
 	origin := strings.TrimSpace(remote.Origin)
 	if channel := normalizeMailboxCreateChannel(mailboxCreateChannel(strings.ToLower(origin))); channel != mailboxCreateChannelAuto {
@@ -462,20 +517,33 @@ func schedulerFailureAccountLabel(failure createMailboxFailure) string {
 	return firstNonEmpty(strings.TrimSpace(failure.AppleID), strings.TrimSpace(failure.AccountID))
 }
 
-func (s *Server) schedulerCreateChannelsByAccount(ownerID string, accountIDs []string) map[string][]mailboxCreateChannel {
+func (s *Server) schedulerCreateChannelsByAccount(ownerID string, accountIDs []string, preferred mailboxCreateChannel) map[string][]mailboxCreateChannel {
 	out := make(map[string][]mailboxCreateChannel)
 	for _, session := range s.sessionsForOwnerAccounts(ownerID, accountIDs) {
 		accountID := strings.TrimSpace(session.AccountID)
 		if accountID == "" {
 			continue
 		}
-		out[accountID] = schedulerCreateChannelsForSession(session)
+		out[accountID] = schedulerCreateChannelsForSession(session, preferred)
 	}
 	return out
 }
 
-func schedulerCreateChannelsForSession(session ICloudSession) []mailboxCreateChannel {
+func schedulerCreateChannelsForSession(session ICloudSession, preferred mailboxCreateChannel) []mailboxCreateChannel {
 	channels := make([]mailboxCreateChannel, 0, 2)
+	preferred = normalizeMailboxCreateChannel(preferred)
+	if preferred == mailboxCreateChannelAppleAccount {
+		if _, ok := appleAccountLoginState(session); ok {
+			return []mailboxCreateChannel{mailboxCreateChannelAppleAccount}
+		}
+		return nil
+	}
+	if preferred == mailboxCreateChannelICloudWeb {
+		if iCloudWebLoginSaved(session) {
+			return []mailboxCreateChannel{mailboxCreateChannelICloudWeb}
+		}
+		return nil
+	}
 	if _, ok := appleAccountLoginState(session); ok {
 		channels = append(channels, mailboxCreateChannelAppleAccount)
 	}
@@ -485,20 +553,34 @@ func schedulerCreateChannelsForSession(session ICloudSession) []mailboxCreateCha
 	return channels
 }
 
-func activeSchedulerCreateRequests(accountIDs []string, channels map[string][]mailboxCreateChannel, disabled map[string]map[mailboxCreateChannel]bool, skipped map[string]bool) []mailboxCreateRequest {
+func activeSchedulerCreateRequests(accountIDs []string, channels map[string][]mailboxCreateChannel, disabled map[string]map[mailboxCreateChannel]bool, skipped map[string]bool, oneShotFallback map[string]mailboxCreateChannel) []mailboxCreateRequest {
 	out := make([]mailboxCreateRequest, 0, len(accountIDs))
 	for _, accountID := range normalizeAccountIDSelection("", accountIDs) {
 		accountID = strings.TrimSpace(accountID)
 		if accountID == "" || skipped[accountID] {
 			continue
 		}
-		channel, ok := nextSchedulerCreateChannel(channels[accountID], disabled[accountID])
+		channel, ok := oneShotSchedulerCreateChannel(oneShotFallback[accountID], disabled[accountID])
+		if !ok {
+			channel, ok = nextSchedulerCreateChannel(channels[accountID], disabled[accountID])
+		}
 		if !ok {
 			continue
 		}
 		out = append(out, mailboxCreateRequest{AccountID: accountID, Channel: channel})
 	}
 	return out
+}
+
+func oneShotSchedulerCreateChannel(channel mailboxCreateChannel, disabled map[mailboxCreateChannel]bool) (mailboxCreateChannel, bool) {
+	channel = normalizeMailboxCreateChannel(channel)
+	if channel == mailboxCreateChannelAuto {
+		return mailboxCreateChannelAuto, false
+	}
+	if disabled != nil && disabled[channel] {
+		return mailboxCreateChannelAuto, false
+	}
+	return channel, true
 }
 
 func nextSchedulerCreateChannel(channels []mailboxCreateChannel, disabled map[mailboxCreateChannel]bool) (mailboxCreateChannel, bool) {
@@ -513,6 +595,56 @@ func nextSchedulerCreateChannel(channels []mailboxCreateChannel, disabled map[ma
 		return channel, true
 	}
 	return mailboxCreateChannelAuto, false
+}
+
+func nextSchedulerCreateChannelAfter(channels []mailboxCreateChannel, disabled map[mailboxCreateChannel]bool, after mailboxCreateChannel) (mailboxCreateChannel, bool) {
+	after = normalizeMailboxCreateChannel(after)
+	seen := after == mailboxCreateChannelAuto
+	for _, channel := range channels {
+		channel = normalizeMailboxCreateChannel(channel)
+		if channel == mailboxCreateChannelAuto {
+			continue
+		}
+		if !seen {
+			seen = channel == after
+			continue
+		}
+		if disabled != nil && disabled[channel] {
+			continue
+		}
+		return channel, true
+	}
+	return mailboxCreateChannelAuto, false
+}
+
+func schedulerTransientCreateFailure(failure createMailboxFailure) bool {
+	switch strings.TrimSpace(failure.Code) {
+	case "apple_account_generate_empty", "apple_account_api_failed", "apple_account_bad_response":
+		return normalizeMailboxCreateChannel(mailboxCreateChannel(failure.Channel)) == mailboxCreateChannelAppleAccount
+	default:
+		return false
+	}
+}
+
+func schedulerTransientCreateRetried(retried map[string]map[mailboxCreateChannel]bool, accountID string, channel mailboxCreateChannel) bool {
+	accountID = strings.TrimSpace(accountID)
+	channel = normalizeMailboxCreateChannel(channel)
+	if accountID == "" || channel == mailboxCreateChannelAuto {
+		return false
+	}
+	return retried[accountID] != nil && retried[accountID][channel]
+}
+
+func markSchedulerTransientCreateRetried(retried map[string]map[mailboxCreateChannel]bool, accountID string, channel mailboxCreateChannel) {
+	accountID = strings.TrimSpace(accountID)
+	channel = normalizeMailboxCreateChannel(channel)
+	if accountID == "" || channel == mailboxCreateChannelAuto {
+		return
+	}
+	if retried[accountID] == nil {
+		retried[accountID] = make(map[mailboxCreateChannel]bool)
+	}
+	retried[accountID][channel] = true
 }
 
 func disableSchedulerCreateChannel(disabled map[string]map[mailboxCreateChannel]bool, accountID string, channel mailboxCreateChannel) {
@@ -551,6 +683,8 @@ func (s *Server) publicMailboxScheduler(r *http.Request) publicMailboxScheduler 
 			IntervalSeconds:      int(defaultMailboxSchedulerInterval.Seconds()),
 			IntervalMinutes:      int(defaultMailboxSchedulerInterval.Minutes()),
 			RoundIntervalSeconds: int(defaultMailboxSchedulerRoundInterval.Seconds()),
+			CreateChannel:        string(mailboxCreateChannelAuto),
+			CreateChannelLabel:   mailboxCreateChannelLabel(mailboxCreateChannelAuto),
 			Status:               "stopped",
 			Events:               []publicMailboxSchedulerEvent{},
 		}
@@ -563,6 +697,8 @@ func (s *Server) publicMailboxScheduler(r *http.Request) publicMailboxScheduler 
 		AccountIDs:           append([]string(nil), state.AccountIDs...),
 		Label:                state.Label,
 		Note:                 state.Note,
+		CreateChannel:        string(normalizeMailboxCreateChannel(state.CreateChannel)),
+		CreateChannelLabel:   mailboxCreateChannelLabel(state.CreateChannel),
 		BatchSize:            state.BatchSize,
 		IntervalSeconds:      state.IntervalSeconds,
 		IntervalMinutes:      state.IntervalSeconds / 60,

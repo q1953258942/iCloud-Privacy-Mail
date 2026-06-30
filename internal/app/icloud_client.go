@@ -294,7 +294,7 @@ func (c *ICloudClient) createPrivacyMailboxWithAppleAccountState(ctx context.Con
 		return ICloudRemoteMailbox{}, withAppleAccountLoginState(session, loginState), err
 	}
 	if strings.TrimSpace(generated.EmailAddress) == "" {
-		return ICloudRemoteMailbox{}, withAppleAccountLoginState(session, loginState), errCode("apple_account_generate_empty", "Apple Account 未返回候选隐私邮箱；"+appleAccountResponseDetail("生成候选隐私邮箱", generatedRaw), true)
+		return ICloudRemoteMailbox{}, withAppleAccountLoginState(session, loginState), errCode("apple_account_generate_empty", "Apple Account 未返回候选隐私邮箱；"+appleAccountRawResponseDetail("生成候选隐私邮箱", generatedRaw), true)
 	}
 
 	var completed struct {
@@ -340,7 +340,7 @@ func (c *ICloudClient) createPrivacyMailboxWithAppleAccountState(ctx context.Con
 		}
 	}
 	if remote.Email == "" {
-		return ICloudRemoteMailbox{}, session, errCode("apple_account_create_empty", "Apple Account 创建后未返回隐私邮箱；"+appleAccountResponseDetail("确认创建隐私邮箱", completedRaw), true)
+		return ICloudRemoteMailbox{}, session, errCode("apple_account_create_empty", "Apple Account 创建后未返回隐私邮箱；"+appleAccountRawResponseDetail("确认创建隐私邮箱", completedRaw), true)
 	}
 	markAppleAccountManageOK(&loginState)
 	session = withAppleAccountLoginState(session, loginState)
@@ -625,6 +625,11 @@ func (c *ICloudClient) callAppleAccount(ctx context.Context, loginState *LoginSt
 	return err
 }
 
+type appleAccountRawResponse struct {
+	StatusCode int
+	Body       []byte
+}
+
 func (c *ICloudClient) fetchAppleAccountManageTokenScnt(ctx context.Context, loginState LoginState, result any) (string, error) {
 	base, err := url.Parse(strings.TrimRight(appleAccountManageBaseForState(loginState), "/") + "/")
 	if err != nil {
@@ -677,13 +682,13 @@ func (c *ICloudClient) fetchAppleAccountManageTokenScnt(ctx context.Context, log
 	return scnt, nil
 }
 
-func (c *ICloudClient) callAppleAccountRaw(ctx context.Context, loginState *LoginState, apiKey, method, path string, body any, result any) ([]byte, error) {
+func (c *ICloudClient) callAppleAccountRaw(ctx context.Context, loginState *LoginState, apiKey, method, path string, body any, result any) (appleAccountRawResponse, error) {
 	if loginState == nil {
-		return nil, errCode("apple_account_session_missing", "当前登录态缺少 Apple Account 管理态，请重新协议登录", true)
+		return appleAccountRawResponse{}, errCode("apple_account_session_missing", "当前登录态缺少 Apple Account 管理态，请重新协议登录", true)
 	}
 	base, err := url.Parse(strings.TrimRight(appleAccountManageBaseForState(*loginState), "/") + "/")
 	if err != nil {
-		return nil, err
+		return appleAccountRawResponse{}, err
 	}
 	rel := &url.URL{Path: strings.TrimLeft(path, "/")}
 	rawURL := base.ResolveReference(rel).String()
@@ -692,13 +697,13 @@ func (c *ICloudClient) callAppleAccountRaw(ctx context.Context, loginState *Logi
 	if body != nil {
 		data, err := json.Marshal(body)
 		if err != nil {
-			return nil, err
+			return appleAccountRawResponse{}, err
 		}
 		reader = bytes.NewReader(data)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, rawURL, reader)
 	if err != nil {
-		return nil, err
+		return appleAccountRawResponse{}, err
 	}
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json")
@@ -729,12 +734,13 @@ func (c *ICloudClient) callAppleAccountRaw(ctx context.Context, loginState *Logi
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, err
+		return appleAccountRawResponse{}, err
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	raw := appleAccountRawResponse{StatusCode: resp.StatusCode, Body: data}
 	if err != nil {
-		return nil, err
+		return raw, err
 	}
 	if os.Getenv("IPM_DEBUG_APPLE_ACCOUNT") == "1" {
 		fmt.Fprintf(os.Stderr, "APPLE_ACCOUNT_DEBUG method=%s path=%s status=%d req_cookie_len=%d req_scnt=%s res_scnt=%s res_session=%s set_cookie=%d body=%q\n",
@@ -753,16 +759,16 @@ func (c *ICloudClient) callAppleAccountRaw(ctx context.Context, loginState *Logi
 		if os.Getenv("IPM_DEBUG_APPLE_ACCOUNT") == "1" {
 			fmt.Fprintf(os.Stderr, "APPLE_ACCOUNT_DEBUG method=%s path=%s status=%d body=%q\n", method, path, resp.StatusCode, appleDebugBody(data))
 		}
-		return data, appleAccountAPIError(resp.StatusCode, data, appleAccountRequestStage(method, path))
+		return raw, appleAccountAPIError(resp.StatusCode, data, appleAccountRequestStage(method, path))
 	}
 	mergeSessionCookies(&loginState.Cookies, resp.Request.URL, resp.Cookies())
 	updateAppleAccountLoginStateFromHeaders(loginState, resp.Header)
 	if result != nil && len(bytes.TrimSpace(data)) > 0 {
 		if err := json.Unmarshal(data, result); err != nil {
-			return data, errCode("apple_account_bad_response", "Apple Account 返回无法解析；"+appleAccountResponseDetail(appleAccountRequestStage(method, path), data), true)
+			return raw, errCode("apple_account_bad_response", "Apple Account 返回无法解析；"+appleAccountRawResponseDetail(appleAccountRequestStage(method, path), raw), true)
 		}
 	}
-	return data, nil
+	return raw, nil
 }
 
 func updateAppleAccountLoginStateFromHeaders(loginState *LoginState, header http.Header) {
@@ -1008,6 +1014,21 @@ func appleAccountResponseDetail(stage string, data []byte) string {
 	body := strings.TrimSpace(appleDebugBody(data))
 	if body == "" {
 		body = "空响应"
+	}
+	return fmt.Sprintf("阶段：%s；原始返回：%s", stage, body)
+}
+
+func appleAccountRawResponseDetail(stage string, raw appleAccountRawResponse) string {
+	stage = strings.TrimSpace(stage)
+	if stage == "" {
+		stage = "未知阶段"
+	}
+	body := strings.TrimSpace(appleDebugBody(raw.Body))
+	if body == "" {
+		body = "空响应"
+	}
+	if raw.StatusCode > 0 {
+		return fmt.Sprintf("阶段：%s；HTTP %d；原始返回：%s", stage, raw.StatusCode, body)
 	}
 	return fmt.Sprintf("阶段：%s；原始返回：%s", stage, body)
 }

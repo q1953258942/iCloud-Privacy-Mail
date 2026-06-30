@@ -76,6 +76,29 @@ func (s *FileStore) SnapshotForOwner(ownerID string) State {
 	return filterStateByOwnerLocked(s.state, strings.TrimSpace(ownerID))
 }
 
+func (s *FileStore) CreateSettingsForOwner(ownerID string) CreateSettings {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return createSettingsForOwnerLocked(s.state, strings.TrimSpace(ownerID))
+}
+
+func (s *FileStore) SaveCreateSettingsForOwner(ownerID string, settings CreateSettings) (CreateSettings, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ownerID = strings.TrimSpace(ownerID)
+	settings = normalizeCreateSettings(ownerID, settings)
+	settings.UpdatedAt = time.Now()
+	for i := range s.state.CreateSettings {
+		if constantTimeEqual(ownerID, s.state.CreateSettings[i].OwnerID) {
+			s.state.CreateSettings[i] = settings
+			return settings, s.saveLocked()
+		}
+	}
+	s.state.CreateSettings = append(s.state.CreateSettings, settings)
+	return settings, s.saveLocked()
+}
+
 func (s *FileStore) Users() []User {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -969,6 +992,7 @@ func cloneState(in State) State {
 		out.ICloudSession = &session
 	}
 	out.ICloudSessions = cloneICloudSessions(in.ICloudSessions)
+	out.CreateSettings = cloneCreateSettings(in.CreateSettings)
 	return out
 }
 
@@ -1052,6 +1076,16 @@ func cloneICloudSessions(in []ICloudSession) []ICloudSession {
 	return out
 }
 
+func cloneCreateSettings(in []CreateSettings) []CreateSettings {
+	out := make([]CreateSettings, 0, len(in))
+	for _, settings := range in {
+		next := settings
+		next.AccountIDs = append([]string(nil), settings.AccountIDs...)
+		out = append(out, next)
+	}
+	return out
+}
+
 func filterStateByOwnerLocked(in State, ownerID string) State {
 	if ownerID == "" {
 		return cloneState(in)
@@ -1089,6 +1123,57 @@ func filterStateByOwnerLocked(in State, ownerID string) State {
 			}
 			out.ICloudSessions = append(out.ICloudSessions, cloned)
 		}
+	}
+	for _, settings := range in.CreateSettings {
+		if constantTimeEqual(ownerID, settings.OwnerID) {
+			next := settings
+			next.AccountIDs = append([]string(nil), settings.AccountIDs...)
+			out.CreateSettings = append(out.CreateSettings, next)
+		}
+	}
+	return out
+}
+
+func createSettingsForOwnerLocked(state State, ownerID string) CreateSettings {
+	ownerID = strings.TrimSpace(ownerID)
+	for _, settings := range state.CreateSettings {
+		if constantTimeEqual(ownerID, settings.OwnerID) {
+			return normalizeCreateSettings(ownerID, settings)
+		}
+	}
+	return defaultCreateSettings(ownerID)
+}
+
+func defaultCreateSettings(ownerID string) CreateSettings {
+	return CreateSettings{
+		OwnerID:                       strings.TrimSpace(ownerID),
+		CreateChannel:                 string(mailboxCreateChannelAuto),
+		SchedulerCreateChannel:        string(mailboxCreateChannelAuto),
+		SchedulerIntervalMinutes:      int(defaultMailboxSchedulerInterval.Round(time.Minute).Minutes()),
+		SchedulerRoundIntervalSeconds: int(defaultMailboxSchedulerRoundInterval.Round(time.Second).Seconds()),
+	}
+}
+
+func normalizeCreateSettings(ownerID string, settings CreateSettings) CreateSettings {
+	defaults := defaultCreateSettings(ownerID)
+	out := settings
+	out.OwnerID = strings.TrimSpace(ownerID)
+	out.Label = strings.TrimSpace(settings.Label)
+	out.Note = strings.TrimSpace(settings.Note)
+	out.AccountIDs = normalizeAccountIDSelection("", settings.AccountIDs)
+	out.CreateChannel = string(normalizeMailboxCreateChannel(mailboxCreateChannel(strings.ToLower(strings.TrimSpace(settings.CreateChannel)))))
+	out.SchedulerCreateChannel = string(normalizeMailboxCreateChannel(mailboxCreateChannel(strings.ToLower(strings.TrimSpace(settings.SchedulerCreateChannel)))))
+	if out.SchedulerIntervalMinutes < 1 {
+		out.SchedulerIntervalMinutes = defaults.SchedulerIntervalMinutes
+	}
+	if out.SchedulerIntervalMinutes > 1440 {
+		out.SchedulerIntervalMinutes = 1440
+	}
+	if out.SchedulerRoundIntervalSeconds < 1 {
+		out.SchedulerRoundIntervalSeconds = defaults.SchedulerRoundIntervalSeconds
+	}
+	if out.SchedulerRoundIntervalSeconds > 600 {
+		out.SchedulerRoundIntervalSeconds = 600
 	}
 	return out
 }

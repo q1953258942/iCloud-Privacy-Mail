@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3659,6 +3660,102 @@ func TestMailboxSchedulerFallsBackToOldInterfaceAfterNewInterfaceFails(t *testin
 	}
 }
 
+func TestMailboxSchedulerRetriesNewInterfaceAfterTransientEmptyResponse(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
+	server := handler.(*Server)
+	ownerID := "owner-scheduler-transient-new"
+	if err := store.SaveICloudSessionForOwner(ownerID, ICloudSession{
+		OwnerID:            ownerID,
+		AppleID:            "transient@example.com",
+		DSID:               "dsid-transient",
+		PremiumMailBaseURL: "https://example.invalid",
+		IsICloudPlus:       true,
+		CanCreateHME:       true,
+		Cookies:            []SessionCookie{{Name: "X-APPLE-WEBAUTH", Value: "cookie", Domain: ".icloud.com", Path: "/"}},
+		LoginStates: []LoginState{
+			{Kind: LoginStateAppleAccount, Host: "appleid.apple.com", Origin: "https://account.apple.com", Scnt: "scnt", SessionID: "sid"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessions := store.ICloudSessionsForOwner(ownerID)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(sessions))
+	}
+	accountID := sessions[0].AccountID
+
+	var attemptsMu sync.Mutex
+	attempts := map[mailboxCreateChannel]int{}
+	var sequence []mailboxCreateChannel
+	server.createMailboxForOwner = func(ctx context.Context, ownerID, accountID, label, note string) (Mailbox, ICloudRemoteMailbox, error) {
+		channel := mailboxCreateChannelFromContext(ctx)
+		attemptsMu.Lock()
+		attempts[channel]++
+		attempt := attempts[channel]
+		sequence = append(sequence, channel)
+		attemptsMu.Unlock()
+		switch channel {
+		case mailboxCreateChannelAppleAccount:
+			switch attempt {
+			case 1:
+				return Mailbox{}, ICloudRemoteMailbox{}, errCode("apple_account_generate_empty", "Apple Account 未返回候选隐私邮箱；阶段：生成候选隐私邮箱；HTTP 200；原始返回：空响应", true)
+			case 2:
+				return Mailbox{}, ICloudRemoteMailbox{}, errCode("apple_account_generate_empty", "Apple Account 未返回候选隐私邮箱；阶段：生成候选隐私邮箱；HTTP 200；原始返回：空响应", true)
+			default:
+				return Mailbox{}, ICloudRemoteMailbox{}, errCode("apple_account_hme_limit", "新接口当前小时额度已用完", true)
+			}
+		case mailboxCreateChannelICloudWeb:
+			if attempt > 1 {
+				return Mailbox{}, ICloudRemoteMailbox{}, errCode("icloud_hme_limit", "旧接口当前小时额度已用完", true)
+			}
+		default:
+			return Mailbox{}, ICloudRemoteMailbox{}, errCode("unexpected_channel", "定时创建没有指定接口", false)
+		}
+		email := fmt.Sprintf("%s-%d@icloud.com", channel, attempt)
+		mailbox, err := store.AddMailboxForOwner(ownerID, accountID, label, email)
+		if err != nil {
+			return Mailbox{}, ICloudRemoteMailbox{}, err
+		}
+		return mailbox, ICloudRemoteMailbox{Email: mailbox.Email, Label: mailbox.Label, IsActive: true, Origin: string(channel)}, nil
+	}
+
+	job := &mailboxSchedulerJob{state: mailboxSchedulerState{Running: true, BatchSize: 1}}
+	server.runMailboxSchedulerBatch(context.Background(), ownerID, job, mailboxSchedulerConfig{
+		AccountIDs: []string{accountID},
+		Label:      "SCH",
+		BatchSize:  1,
+	}, 1)
+	state, events := job.snapshot()
+	attemptsMu.Lock()
+	defer attemptsMu.Unlock()
+	wantSequence := []mailboxCreateChannel{
+		mailboxCreateChannelAppleAccount,
+		mailboxCreateChannelAppleAccount,
+		mailboxCreateChannelICloudWeb,
+		mailboxCreateChannelICloudWeb,
+	}
+	if !reflect.DeepEqual(sequence, wantSequence) {
+		t.Fatalf("channel sequence = %+v, want %+v", sequence, wantSequence)
+	}
+	if state.Success != 1 || state.Failed != 1 {
+		t.Fatalf("scheduler state = %+v, want success=1 failed=1", state)
+	}
+	var sawTransientRetry bool
+	var sawTransientFallback bool
+	for _, event := range events {
+		if event.Type == "channel_failed" && strings.Contains(event.Message, "HTTP 200") && strings.Contains(event.Message, "下轮重试新接口") {
+			sawTransientRetry = true
+		}
+		if event.Type == "channel_failed" && strings.Contains(event.Message, "HTTP 200") && strings.Contains(event.Message, "切换旧接口继续尝试") {
+			sawTransientFallback = true
+		}
+	}
+	if !sawTransientRetry || !sawTransientFallback {
+		t.Fatalf("events did not include transient retry and fallback: retry=%v fallback=%v events=%+v", sawTransientRetry, sawTransientFallback, events)
+	}
+}
+
 func TestCreateAppleAccountMailboxKeepsRefreshedStateWhenCreateFails(t *testing.T) {
 	oldBaseURL := appleAccountManageBaseURL
 	defer func() { appleAccountManageBaseURL = oldBaseURL }()
@@ -4012,6 +4109,129 @@ func TestCreateICloudMailboxResponseIncludesCreateChannel(t *testing.T) {
 	}
 	if body.Remotes[0].Origin != "APPLE_ACCOUNT" || body.Remotes[0].Channel != string(mailboxCreateChannelAppleAccount) || body.Remotes[0].ChannelLabel != "新接口" {
 		t.Fatalf("remote channel = %+v, want APPLE_ACCOUNT apple_account 新接口", body.Remotes[0])
+	}
+}
+
+func TestCreateICloudMailboxUsesRequestedCreateChannel(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
+	server := handler.(*Server)
+	cookie, user := registerTestUser(t, handler, "create-requested-channel", "multi123")
+	if err := store.SaveICloudSessionForOwner(user.ID, ICloudSession{
+		OwnerID:      user.ID,
+		AppleID:      "requested-channel@example.com",
+		DSID:         "dsid-requested-channel",
+		IsICloudPlus: true,
+		CanCreateHME: true,
+		Cookies:      []SessionCookie{{Name: "a", Value: "1"}},
+		LoginStates: []LoginState{
+			{Kind: LoginStateAppleAccount, Host: "appleid.apple.com", Origin: "https://account.apple.com", Scnt: "scnt"},
+			{Kind: LoginStateICloudWeb, Host: "www.icloud.com", Origin: "https://www.icloud.com", Cookies: []SessionCookie{{Name: "a", Value: "1"}}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessions := store.ICloudSessionsForOwner(user.ID)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(sessions))
+	}
+	accountID := sessions[0].AccountID
+	server.createMailboxForOwner = func(ctx context.Context, ownerID, accountID, label, note string) (Mailbox, ICloudRemoteMailbox, error) {
+		channel := mailboxCreateChannelFromContext(ctx)
+		if channel != mailboxCreateChannelICloudWeb {
+			t.Fatalf("create channel = %q, want icloud_web", channel)
+		}
+		mailbox, err := store.AddMailboxForOwner(ownerID, accountID, label, "requested-old@example.icloud.com")
+		if err != nil {
+			return Mailbox{}, ICloudRemoteMailbox{}, err
+		}
+		return mailbox, ICloudRemoteMailbox{Email: mailbox.Email, Label: mailbox.Label, IsActive: true, Origin: string(channel)}, nil
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/icloud/mailboxes/create", strings.NewReader(fmt.Sprintf(`{"account_id":%q,"label":"REQ","create_channel":"icloud_web"}`, accountID)))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create = %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestCreateSettingsAreSavedServerSide(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
+	cookie, user := registerTestUser(t, handler, "create-settings", "multi123")
+	account, err := store.AddAccountForOwner(user.ID, "A", "a@example.com", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/create-settings", strings.NewReader(fmt.Sprintf(`{
+		"label":"UPI",
+		"note":"server side",
+		"account_ids":[%q],
+		"create_channel":"apple_account",
+		"scheduler_create_channel":"icloud_web",
+		"scheduler_interval_minutes":30,
+		"scheduler_round_interval_seconds":8
+	}`, account.ID)))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("save settings = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/create-settings", nil)
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("get settings = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Settings struct {
+			Label                         string   `json:"label"`
+			Note                          string   `json:"note"`
+			AccountIDs                    []string `json:"account_ids"`
+			CreateChannel                 string   `json:"create_channel"`
+			SchedulerCreateChannel        string   `json:"scheduler_create_channel"`
+			SchedulerIntervalMinutes      int      `json:"scheduler_interval_minutes"`
+			SchedulerRoundIntervalSeconds int      `json:"scheduler_round_interval_seconds"`
+		} `json:"settings"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Settings.Label != "UPI" ||
+		body.Settings.Note != "server side" ||
+		!reflect.DeepEqual(body.Settings.AccountIDs, []string{account.ID}) ||
+		body.Settings.CreateChannel != string(mailboxCreateChannelAppleAccount) ||
+		body.Settings.SchedulerCreateChannel != string(mailboxCreateChannelICloudWeb) ||
+		body.Settings.SchedulerIntervalMinutes != 30 ||
+		body.Settings.SchedulerRoundIntervalSeconds != 8 {
+		t.Fatalf("settings = %+v, want saved server config", body.Settings)
+	}
+}
+
+func TestSchedulerCreateChannelsRespectRequestedChannel(t *testing.T) {
+	session := ICloudSession{
+		Cookies: []SessionCookie{{Name: "a", Value: "1"}},
+		LoginStates: []LoginState{
+			{Kind: LoginStateAppleAccount, Host: "appleid.apple.com", Origin: "https://account.apple.com", Scnt: "scnt"},
+			{Kind: LoginStateICloudWeb, Host: "www.icloud.com", Origin: "https://www.icloud.com", Cookies: []SessionCookie{{Name: "a", Value: "1"}}},
+		},
+	}
+	if got := schedulerCreateChannelsForSession(session, mailboxCreateChannelICloudWeb); !reflect.DeepEqual(got, []mailboxCreateChannel{mailboxCreateChannelICloudWeb}) {
+		t.Fatalf("old-only channels = %+v", got)
+	}
+	if got := schedulerCreateChannelsForSession(session, mailboxCreateChannelAppleAccount); !reflect.DeepEqual(got, []mailboxCreateChannel{mailboxCreateChannelAppleAccount}) {
+		t.Fatalf("new-only channels = %+v", got)
+	}
+	if got := schedulerCreateChannelsForSession(session, mailboxCreateChannelAuto); !reflect.DeepEqual(got, []mailboxCreateChannel{mailboxCreateChannelAppleAccount, mailboxCreateChannelICloudWeb}) {
+		t.Fatalf("auto channels = %+v", got)
 	}
 }
 
