@@ -1071,17 +1071,27 @@ func (s *Server) handleCreateICloudMailbox(w http.ResponseWriter, r *http.Reques
 	if len(failures) > 0 {
 		status = http.StatusMultiStatus
 	}
+	remoteOut := make([]map[string]any, 0, len(remotes))
+	for index, remote := range remotes {
+		channel := mailboxCreateChannelFromRemote(remote)
+		channelValue := string(channel)
+		channelLabel := mailboxCreateChannelLabel(channel)
+		if index < len(out) {
+			out[index].CreateChannel = channelValue
+			out[index].CreateChannelLabel = channelLabel
+		}
+		remoteOut = append(remoteOut, map[string]any{
+			"anonymous_id":  remote.AnonymousID,
+			"email":         remote.Email,
+			"is_active":     remote.IsActive,
+			"origin":        remote.Origin,
+			"channel":       channelValue,
+			"channel_label": channelLabel,
+		})
+	}
 	firstMailbox := publicMailbox{}
 	if len(out) > 0 {
 		firstMailbox = out[0]
-	}
-	remoteOut := make([]map[string]any, 0, len(remotes))
-	for _, remote := range remotes {
-		remoteOut = append(remoteOut, map[string]any{
-			"anonymous_id": remote.AnonymousID,
-			"email":        remote.Email,
-			"is_active":    remote.IsActive,
-		})
 	}
 	writeJSON(w, status, map[string]any{
 		"success":   true,
@@ -2201,6 +2211,7 @@ func (s *Server) createICloudMailboxRemoteWithChannel(ctx context.Context, owner
 		return s.createICloudMailboxRemoteICloudWeb(ctx, session, label, note, key)
 	}
 
+	var appleAccountErr error
 	if _, ok := appleAccountLoginState(session); ok {
 		remote, err := s.createICloudMailboxRemoteAppleAccount(ctx, ownerID, session, label, note, key)
 		if err == nil {
@@ -2209,9 +2220,14 @@ func (s *Server) createICloudMailboxRemoteWithChannel(ctx context.Context, owner
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return ICloudRemoteMailbox{}, err
 		}
+		appleAccountErr = err
 		s.logger.Warn("Apple Account mailbox create failed; falling back to iCloud HME", "account_id", session.AccountID, "err", err)
 	}
-	return s.createICloudMailboxRemoteICloudWeb(ctx, session, label, note, key)
+	remote, err := s.createICloudMailboxRemoteICloudWeb(ctx, session, label, note, key)
+	if err != nil && appleAccountErr != nil {
+		return ICloudRemoteMailbox{}, errCode("mailbox_create_all_channels_failed", "新接口失败："+appleAccountErr.Error()+"；旧接口失败："+err.Error(), true)
+	}
+	return remote, err
 }
 
 func (s *Server) createICloudMailboxRemoteAppleAccount(ctx context.Context, ownerID string, session ICloudSession, label, note, key string) (ICloudRemoteMailbox, error) {
@@ -2220,6 +2236,9 @@ func (s *Server) createICloudMailboxRemoteAppleAccount(ctx context.Context, owne
 	}
 	remote, updatedSession, err := NewICloudClient().CreatePrivacyMailboxWithAppleAccount(ctx, session, s.cfg.AppleAccountAPIKey, label, note)
 	s.markMailboxCreateFinished(key)
+	if isCodedError(err, "apple_account_hme_limit") {
+		s.markMailboxCreateCooldown(key, mailboxCreateLimitCooldown)
+	}
 	if _, ok := appleAccountLoginState(updatedSession); ok {
 		if saveErr := s.store.SaveICloudSessionForOwner(ownerID, updatedSession); saveErr != nil {
 			s.logger.Warn("failed to save updated Apple Account login state", "account_id", session.AccountID, "err", saveErr)
@@ -2913,35 +2932,41 @@ func publicSession(session *ICloudSession) publicICloudSession {
 	appleAccountLoginSaved := appleAccountLoginSaved(*session)
 	icloudWebState, _ := iCloudWebLoginState(*session)
 	appleAccountState, _ := appleAccountLoginState(*session)
+	appleAccountNextRefreshAt := time.Time{}
+	if appleAccountLoginSaved && !appleAccountState.ManageExpiresAt.IsZero() {
+		appleAccountNextRefreshAt = appleAccountState.ManageExpiresAt.Add(-appleAccountManageRefreshSkew)
+	}
 	return publicICloudSession{
-		Saved:                    true,
-		AccountID:                session.AccountID,
-		SavedAt:                  formatTime(session.SavedAt),
-		AppleID:                  strings.TrimSpace(session.AppleID),
-		DSIDMask:                 maskSecret(session.DSID, 4),
-		ClientBuildNumber:        session.ClientBuildNumber,
-		MasteringNumber:          session.MasteringNumber,
-		PremiumMailBaseURL:       session.PremiumMailBaseURL,
-		MailGatewayBaseURL:       session.MailGatewayBaseURL,
-		MailBaseURL:              session.MailBaseURL,
-		Host:                     session.Host,
-		IsICloudPlus:             session.IsICloudPlus,
-		CanCreateHME:             session.CanCreateHME,
-		CookieCount:              len(session.Cookies),
-		ICloudWebLoginSaved:      icloudWebLoginSaved,
-		ICloudWebLoginChecked:    !icloudWebState.LastCheckedAt.IsZero(),
-		ICloudWebLoginOK:         icloudWebState.LastCheckOK,
-		ICloudWebLoginStatus:     loginStatePublicStatus(icloudWebLoginSaved, icloudWebState),
-		AppleAccountLoginSaved:   appleAccountLoginSaved,
-		AppleAccountLoginChecked: !appleAccountState.LastCheckedAt.IsZero(),
-		AppleAccountLoginOK:      appleAccountState.LastCheckOK,
-		AppleAccountLoginStatus:  loginStatePublicStatus(appleAccountLoginSaved, appleAccountState),
-		AppleAccountManageReady:  appleAccountManageReady(*session),
-		ProviderConfigured:       session.IsICloudPlus && session.CanCreateHME && icloudWebLoginSaved,
-		NeedsManualLogin:         !icloudWebLoginSaved && !appleAccountLoginSaved,
-		LastCheckedAt:            formatTime(session.LastCheckedAt),
-		LastCheckOK:              session.LastCheckOK,
-		LastStatusMessage:        message,
+		Saved:                       true,
+		AccountID:                   session.AccountID,
+		SavedAt:                     formatTime(session.SavedAt),
+		AppleID:                     strings.TrimSpace(session.AppleID),
+		DSIDMask:                    maskSecret(session.DSID, 4),
+		ClientBuildNumber:           session.ClientBuildNumber,
+		MasteringNumber:             session.MasteringNumber,
+		PremiumMailBaseURL:          session.PremiumMailBaseURL,
+		MailGatewayBaseURL:          session.MailGatewayBaseURL,
+		MailBaseURL:                 session.MailBaseURL,
+		Host:                        session.Host,
+		IsICloudPlus:                session.IsICloudPlus,
+		CanCreateHME:                session.CanCreateHME,
+		CookieCount:                 len(session.Cookies),
+		ICloudWebLoginSaved:         icloudWebLoginSaved,
+		ICloudWebLoginChecked:       !icloudWebState.LastCheckedAt.IsZero(),
+		ICloudWebLoginOK:            icloudWebState.LastCheckOK,
+		ICloudWebLoginStatus:        loginStatePublicStatus(icloudWebLoginSaved, icloudWebState),
+		AppleAccountLoginSaved:      appleAccountLoginSaved,
+		AppleAccountLoginChecked:    !appleAccountState.LastCheckedAt.IsZero(),
+		AppleAccountLoginOK:         appleAccountState.LastCheckOK,
+		AppleAccountLoginStatus:     loginStatePublicStatus(appleAccountLoginSaved, appleAccountState),
+		AppleAccountNextRefreshAt:   formatTime(appleAccountNextRefreshAt),
+		AppleAccountManageExpiresAt: formatTime(appleAccountState.ManageExpiresAt),
+		AppleAccountManageReady:     appleAccountManageReady(*session),
+		ProviderConfigured:          session.IsICloudPlus && session.CanCreateHME && icloudWebLoginSaved,
+		NeedsManualLogin:            !icloudWebLoginSaved && !appleAccountLoginSaved,
+		LastCheckedAt:               formatTime(session.LastCheckedAt),
+		LastCheckOK:                 session.LastCheckOK,
+		LastStatusMessage:           message,
 	}
 }
 

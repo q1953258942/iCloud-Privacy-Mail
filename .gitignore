@@ -11,6 +11,7 @@ dist/
 data/
 logs/
 captures/
+苹果登录JS分析/
 .anna_manifest_tmp.json
 .anna_skills/
 *.db
@@ -18,6 +19,7 @@ captures/
 *.sqlite3
 
 # Local config / secrets
+.secrets/
 config.json
 config.local.json
 *.secret.json

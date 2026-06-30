@@ -579,6 +579,17 @@
       background: transparent;
       box-shadow: none;
     }
+    .create-account-primary {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex-wrap: wrap;
+    }
+    .create-account-title {
+      min-width: 0;
+      word-break: break-all;
+    }
     .create-account-option small {
       color: var(--muted);
       font-weight: 700;
@@ -624,6 +635,30 @@
       color: var(--faint);
       border-color: var(--line);
       background: var(--soft-glass);
+    }
+    .manage-refresh-clock {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      border: 1px solid var(--ok-line);
+      border-radius: 999px;
+      padding: 3px 8px;
+      color: var(--ok);
+      background: var(--ok-soft);
+      font-size: 12px;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+    .manage-refresh-clock.due {
+      color: var(--warn);
+      border-color: var(--warn-line);
+      background: var(--warn-soft);
+    }
+    .session-card-line {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
     }
     .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 16px 18px; }
     .field-grid .full, .form .full { grid-column: 1 / -1; }
@@ -1236,6 +1271,7 @@
     let sessionCheckTimer = null;
     let sessionCheckInFlight = false;
     let schedulerPollTimer = null;
+    let manageRefreshClockTimer = null;
     let lastSchedulerCreatedEventID = 0;
     let createAccountSelectionTouched = false;
     let selectedCreateAccountIDs = new Set();
@@ -1456,6 +1492,55 @@
       return `<span class="login-chip ${mode}">${esc(label)}：${esc(value)}</span>`;
     }
 
+    function parseTimeValue(value) {
+      if (!value) return null;
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? null : date;
+    }
+
+    function exactTimeText(value) {
+      const date = parseTimeValue(value);
+      if (!date) return value || '';
+      return date.toLocaleString('zh-CN', {hour12: false});
+    }
+
+    function manageRefreshText(value) {
+      const date = parseTimeValue(value);
+      if (!date) return '待检测';
+      const diff = date.getTime() - Date.now();
+      if (diff <= 0) return '等待刷新';
+      const totalSeconds = Math.ceil(diff / 1000);
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+      if (hours > 0) return `${hours}小时${String(minutes).padStart(2, '0')}分`;
+      return `${minutes}分${String(seconds).padStart(2, '0')}秒`;
+    }
+
+    function updateManageRefreshClocks() {
+      document.querySelectorAll('.manage-refresh-clock').forEach(node => {
+        const refreshAt = node.dataset.refreshAt || '';
+        const text = manageRefreshText(refreshAt);
+        node.textContent = `新接口刷新：${text}`;
+        node.classList.toggle('due', !!refreshAt && text === '等待刷新');
+      });
+    }
+
+    function ensureManageRefreshClockTimer() {
+      if (manageRefreshClockTimer) return;
+      manageRefreshClockTimer = setInterval(updateManageRefreshClocks, 1000);
+    }
+
+    function sessionManageRefreshBadge(session) {
+      if (!appleAccountLoginSaved(session)) return '';
+      const refreshAt = session.apple_account_next_refresh_at || '';
+      const expiresAt = session.apple_account_manage_expires_at || '';
+      const title = refreshAt
+        ? `下次刷新：${exactTimeText(refreshAt)}${expiresAt ? `；登录态到期：${exactTimeText(expiresAt)}` : ''}`
+        : '新接口已登录，等待下次检测后显示刷新时间';
+      return `<span class="manage-refresh-clock" data-refresh-at="${esc(refreshAt)}" data-expires-at="${esc(expiresAt)}" title="${esc(title)}">新接口刷新：${esc(manageRefreshText(refreshAt))}</span>`;
+    }
+
     function loginStateChipMode(saved, checked, ok) {
       if (!saved) return 'off';
       if (!checked) return 'warn';
@@ -1539,7 +1624,7 @@
         const checked = selectedCreateAccountIDs.has(id) ? 'checked' : '';
         const title = createAccountDisplayName(session);
         return `<label class="create-account-option">
-          <span><input type="checkbox" ${checked} onchange="toggleCreateAccount(${esc(JSON.stringify(id))}, this.checked)"> ${esc(title)}</span>
+          <span class="create-account-primary"><input type="checkbox" ${checked} onchange="toggleCreateAccount(${esc(JSON.stringify(id))}, this.checked)"> <span class="create-account-title">${esc(title)}</span>${sessionManageRefreshBadge(session)}</span>
           <small class="login-status-wrap">${sessionLoginBadges(session)}<span>${esc(sessionCheckText(session) || `账号 ${index + 1}`)}</span></small>
         </label>`;
       }).join('');
@@ -1549,6 +1634,7 @@
           <button type="button" onclick="selectCreateAccounts(false)">全不选</button>
           <span class="muted">已选择 ${selectedCount}/${sessions.length} 个账号；未勾选的登录态不会创建邮箱，但仍可取验证码。</span>
         </div>` + items;
+      updateManageRefreshClocks();
     }
 
     function toggleCreateAccount(accountID, checked) {
@@ -2124,11 +2210,12 @@
       $('icloudSessionInfo').innerHTML =
         `<div>已保存 ${sessions.length} 个 Apple 登录态，点击 TAB 切换查看。</div>` +
         `<div class="session-tabs">${tabs}</div>` +
-        `<div class="session-card">Apple ID：${esc(active.apple_id || '-')}<br>` +
+        `<div class="session-card"><div class="session-card-line"><span>Apple ID：${esc(active.apple_id || '-')}</span>${sessionManageRefreshBadge(active)}</div>` +
         `账号ID：${esc(active.account_id || '-')}<br>` +
         `<div class="login-chips">${sessionLoginBadges(active)}</div>` +
         `${esc(overallLoginStateText(active))}</div>`;
       renderCreateAccountSelector();
+      updateManageRefreshClocks();
     }
 
     function sessionKey(session) {
@@ -2324,14 +2411,18 @@
           note
         })});
         const mailboxes = data.mailboxes && data.mailboxes.length ? data.mailboxes : (data.mailbox && data.mailbox.id ? [data.mailbox] : []);
+        const remotes = data.remotes || [];
         const failures = data.failures || [];
         if (mailboxes.length > 0) {
           $('msgMailboxId').value = mailboxes[mailboxes.length - 1].id;
         }
-        mailboxes.forEach(mailbox => log(`创建成功：${mailbox.email}（${mailbox.account_label || mailbox.account_apple_id || mailbox.account_id || '未绑定账号'}）`));
-        failures.forEach(failure => log(`账号创建失败：${failure.apple_id || failure.account_id || '-'}，${failure.error || '未知错误'}；本次只记录该账号失败，其他账号已继续`));
+        mailboxes.forEach((mailbox, index) => {
+          const channel = createChannelLabel(mailbox.create_channel || (remotes[index] && remotes[index].channel));
+          log(`创建成功：${mailbox.email}（${mailbox.account_label || mailbox.account_apple_id || mailbox.account_id || '未绑定账号'}，使用${channel}）`);
+        });
+        failures.forEach(failure => log(`账号创建失败：${failure.apple_id || failure.account_id || '-'}，${failure.channel ? '使用' + createChannelLabel(failure.channel) + '，' : ''}${failure.error || '未知错误'}；本次只记录该账号失败，其他账号已继续`));
         progress.textContent = `本次创建完成：成功 ${mailboxes.length}，失败 ${failures.length}`;
-        renderCreateDetails(mailboxes, failures);
+        renderCreateDetails(mailboxes, failures, remotes);
         log(`本次创建完成：成功 ${mailboxes.length}，失败 ${failures.length}`);
       } catch (err) {
         progress.textContent = `本次创建失败：${err.message}`;
@@ -2343,20 +2434,29 @@
       }
     }
 
-    function renderCreateDetails(mailboxes, failures) {
+    function createChannelLabel(channel) {
+      const value = String(channel || '').toLowerCase();
+      if (value === 'apple_account' || value === 'apple-account' || value === 'apple account') return '新接口';
+      if (value === 'icloud_web' || value === 'icloud-web' || value === 'icloud web') return '旧接口';
+      return '自动接口';
+    }
+
+    function renderCreateDetails(mailboxes, failures, remotes = []) {
       const lines = [`本次创建明细：成功 ${mailboxes.length}，失败 ${failures.length}`];
       if (mailboxes.length > 0) {
         lines.push('', '成功：');
         mailboxes.forEach((mailbox, index) => {
           const owner = mailbox.account_label || mailbox.account_apple_id || mailbox.account_id || '未绑定账号';
-          lines.push(`${index + 1}. ${mailbox.email || '-'} / ${owner}`);
+          const channel = createChannelLabel(mailbox.create_channel || (remotes[index] && remotes[index].channel));
+          lines.push(`${index + 1}. ${mailbox.email || '-'} / ${owner} / 使用${channel}`);
         });
       }
       if (failures.length > 0) {
         lines.push('', '失败：');
         failures.forEach((failure, index) => {
           const account = failure.apple_id || failure.account_id || '未知账号';
-          lines.push(`${index + 1}. ${account} / ${failure.error || '未知错误'}`);
+          const channel = failure.channel ? ` / 使用${createChannelLabel(failure.channel)}` : '';
+          lines.push(`${index + 1}. ${account}${channel} / ${failure.error || '未知错误'}`);
         });
       }
       setCreateLog(lines.join('\n'));
@@ -2524,6 +2624,7 @@
     initAppearanceControls();
     initViewNavigation();
     initSessionCheckSettings();
+    ensureManageRefreshClockTimer();
     ensureAuth()
       .then(() => Promise.all([refresh(), refreshMailboxScheduler({silent: true})]))
       .then(() => ensureSchedulerPolling())

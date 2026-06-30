@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -216,6 +217,49 @@ func TestAppleDebugBodyRedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestAppleAccountManageFingerprintUsesCapturedLocale(t *testing.T) {
+	var info map[string]string
+	if err := json.Unmarshal([]byte(appleAccountFDClientInfo("test-agent")), &info); err != nil {
+		t.Fatal(err)
+	}
+	if info["U"] != "test-agent" || info["L"] != appleAccountManageLanguage || info["Z"] != "GMT+08:00" {
+		t.Fatalf("fingerprint info = %#v, want zh/GMT+08:00", info)
+	}
+	if strings.TrimSpace(info["F"]) == "" {
+		t.Fatalf("fingerprint info missing compressed fingerprint: %#v", info)
+	}
+}
+
+func TestAppleAccountAPIErrorDoesNotTreatGenericHTTPAsAuthExpired(t *testing.T) {
+	generic := appleAccountAPIError(http.StatusUnauthorized, []byte(`<html><body>401 Unauthorized</body></html>`), "测试阶段")
+	if isCodedError(generic, "apple_account_auth_failed") {
+		t.Fatalf("generic 401 classified as auth failed: %v", generic)
+	}
+	if !isCodedError(generic, "apple_account_api_failed") {
+		t.Fatalf("generic 401 code = %v, want apple_account_api_failed", generic)
+	}
+
+	expired := appleAccountAPIError(http.StatusUnauthorized, []byte(`{"service_errors":[{"message":"authentication_failed"}]}`), "测试阶段")
+	if !isCodedError(expired, "apple_account_auth_failed") {
+		t.Fatalf("explicit auth error = %v, want apple_account_auth_failed", expired)
+	}
+}
+
+func TestAppleAccountOperationGateSerializesSameAccount(t *testing.T) {
+	release, err := acquireAppleAccountOperationGate(context.Background(), "test-owner:test-account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_, err = acquireAppleAccountOperationGate(ctx, "test-owner:test-account")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second gate error = %v, want context deadline", err)
+	}
+}
+
 func TestICloudEndpointAddsProtocolQuery(t *testing.T) {
 	client := NewICloudClient()
 	got, err := client.endpoint(ICloudSession{
@@ -374,10 +418,14 @@ func TestPublicSessionSeparatesLoginStateKinds(t *testing.T) {
 	if icloudOnly.AppleAccountLoginSaved || icloudOnly.AppleAccountManageReady {
 		t.Fatalf("icloud-only state mixed with apple account: %+v", icloudOnly)
 	}
+	if icloudOnly.AppleAccountNextRefreshAt != "" || icloudOnly.AppleAccountManageExpiresAt != "" {
+		t.Fatalf("icloud-only state should not expose apple account refresh time: %+v", icloudOnly)
+	}
 }
 
 func TestPublicSessionExposesPerLoginStateCheckStatus(t *testing.T) {
 	checkedAt := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
+	expiresAt := checkedAt.Add(15 * time.Minute)
 	got := publicSession(&ICloudSession{
 		SavedAt: time.Now(),
 		AppleID: "state@example.com",
@@ -389,6 +437,7 @@ func TestPublicSessionExposesPerLoginStateCheckStatus(t *testing.T) {
 				LastCheckedAt:     checkedAt,
 				LastCheckOK:       true,
 				LastStatusMessage: "新接口登录态正常",
+				ManageExpiresAt:   expiresAt,
 			},
 			{
 				Kind:              LoginStateICloudWeb,
@@ -401,6 +450,9 @@ func TestPublicSessionExposesPerLoginStateCheckStatus(t *testing.T) {
 	})
 	if !got.AppleAccountLoginChecked || !got.AppleAccountLoginOK || got.AppleAccountLoginStatus != "登录态正常" {
 		t.Fatalf("apple account status = checked:%t ok:%t text:%q", got.AppleAccountLoginChecked, got.AppleAccountLoginOK, got.AppleAccountLoginStatus)
+	}
+	if got.AppleAccountManageExpiresAt != formatTime(expiresAt) || got.AppleAccountNextRefreshAt != formatTime(expiresAt.Add(-appleAccountManageRefreshSkew)) {
+		t.Fatalf("apple account refresh times = next:%q expires:%q", got.AppleAccountNextRefreshAt, got.AppleAccountManageExpiresAt)
 	}
 	if !got.ICloudWebLoginChecked || got.ICloudWebLoginOK || got.ICloudWebLoginStatus != "登录态异常" {
 		t.Fatalf("icloud web status = checked:%t ok:%t text:%q", got.ICloudWebLoginChecked, got.ICloudWebLoginOK, got.ICloudWebLoginStatus)
@@ -529,11 +581,12 @@ func TestICloudClientAppleAccountGenerateEmptyIncludesRawBody(t *testing.T) {
 	client := &ICloudClient{client: ts.Client()}
 	_, _, err := client.CreatePrivacyMailboxWithAppleAccount(t.Context(), ICloudSession{
 		LoginStates: []LoginState{{
-			Kind:          LoginStateAppleAccount,
-			Scnt:          "scnt-current",
-			APIKey:        "fresh-key",
-			LastCheckedAt: time.Now(),
-			LastCheckOK:   true,
+			Kind:            LoginStateAppleAccount,
+			Scnt:            "scnt-current",
+			APIKey:          "fresh-key",
+			LastCheckedAt:   time.Now(),
+			ManageExpiresAt: time.Now().Add(15 * time.Minute),
+			LastCheckOK:     true,
 		}},
 	}, "", "LAB", "")
 	if err == nil {
@@ -717,11 +770,12 @@ func TestICloudClientCreatePrivacyMailboxWithAppleAccountReusesFreshState(t *tes
 	client := &ICloudClient{client: ts.Client()}
 	remote, updatedSession, err := client.CreatePrivacyMailboxWithAppleAccount(t.Context(), ICloudSession{
 		LoginStates: []LoginState{{
-			Kind:          LoginStateAppleAccount,
-			Scnt:          "scnt-current",
-			APIKey:        "fresh-key",
-			LastCheckedAt: checkedAt,
-			LastCheckOK:   true,
+			Kind:            LoginStateAppleAccount,
+			Scnt:            "scnt-current",
+			APIKey:          "fresh-key",
+			LastCheckedAt:   checkedAt,
+			ManageExpiresAt: checkedAt.Add(15 * time.Minute),
+			LastCheckOK:     true,
 		}},
 	}, "", "LAB", "")
 	if err != nil {
@@ -741,6 +795,158 @@ func TestICloudClientCreatePrivacyMailboxWithAppleAccountReusesFreshState(t *tes
 	updatedState, ok := appleAccountLoginState(updatedSession)
 	if !ok || updatedState.Scnt != "scnt-after-confirm" || updatedState.APIKey != "fresh-key" || !updatedState.LastCheckOK || updatedState.LastCheckedAt.IsZero() || updatedState.LastCheckedAt.Before(checkedAt) {
 		t.Fatalf("updated apple account state = %+v ok=%v, want reused fresh state marked ok", updatedState, ok)
+	}
+}
+
+func TestICloudClientCreatePrivacyMailboxWithAppleAccountRefreshesExpiredManageState(t *testing.T) {
+	oldBaseURL := appleAccountManageBaseURL
+	defer func() { appleAccountManageBaseURL = oldBaseURL }()
+
+	var paths []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /account/manage/gs/ws/token":
+			if r.Header.Get("scnt") != "stale-scnt" {
+				t.Fatalf("token scnt header = %q, want stale-scnt", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "scnt-after-token")
+			_, _ = w.Write([]byte(`{"timeOutInterval":15}`))
+		case "GET /account/manage":
+			if r.Header.Get("scnt") != "scnt-after-token" {
+				t.Fatalf("manage scnt header = %q, want scnt-after-token", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "scnt-after-manage")
+			_, _ = w.Write([]byte(`{"apiKey":"fresh-key"}`))
+		case "POST /account/manage/email/private/add":
+			if r.Header.Get("X-Apple-Api-Key") != "fresh-key" {
+				t.Fatalf("add api key header = %q, want fresh-key", r.Header.Get("X-Apple-Api-Key"))
+			}
+			if r.Header.Get("scnt") != "scnt-after-manage" {
+				t.Fatalf("add scnt header = %q, want scnt-after-manage", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "scnt-after-add")
+			_, _ = w.Write([]byte(`{"emailAddress":"TTL.Alias@icloud.com","active":false}`))
+		case "PUT /account/manage/email/private/add/complete":
+			w.Header().Set("scnt", "scnt-after-complete")
+			_, _ = w.Write([]byte(`{"emailAddress":"TTL.Alias@icloud.com","id":"ttl123","active":true}`))
+		case "GET /account/manage/email/private/ttl123.em":
+			w.Header().Set("scnt", "scnt-after-confirm")
+			_, _ = w.Write([]byte(`{"emailAddress":"TTL.Alias@icloud.com","id":"ttl123","active":true}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer ts.Close()
+	appleAccountManageBaseURL = ts.URL
+
+	now := time.Now()
+	client := &ICloudClient{client: ts.Client()}
+	remote, updatedSession, err := client.CreatePrivacyMailboxWithAppleAccount(t.Context(), ICloudSession{
+		LoginStates: []LoginState{{
+			Kind:            LoginStateAppleAccount,
+			Scnt:            "stale-scnt",
+			APIKey:          "stale-key",
+			LastCheckedAt:   now.Add(-2 * time.Minute),
+			ManageExpiresAt: now.Add(30 * time.Second),
+			LastCheckOK:     true,
+		}},
+	}, "", "LAB", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.Email != "ttl.alias@icloud.com" {
+		t.Fatalf("remote email = %q, want ttl.alias@icloud.com", remote.Email)
+	}
+	wantPaths := []string{
+		"GET /account/manage/gs/ws/token",
+		"GET /account/manage",
+		"POST /account/manage/email/private/add",
+		"PUT /account/manage/email/private/add/complete",
+		"GET /account/manage/email/private/ttl123.em",
+	}
+	if strings.Join(paths, "\n") != strings.Join(wantPaths, "\n") {
+		t.Fatalf("paths = %#v, want %#v", paths, wantPaths)
+	}
+	updatedState, ok := appleAccountLoginState(updatedSession)
+	if !ok || updatedState.APIKey != "fresh-key" || updatedState.Scnt != "scnt-after-confirm" || !updatedState.LastCheckOK || !updatedState.ManageExpiresAt.After(now) {
+		t.Fatalf("updated apple account state = %+v ok=%v, want refreshed TTL state", updatedState, ok)
+	}
+}
+
+func TestICloudClientRefreshAppleAccountManageStateUsesBootstrapTTLWhenInitialTokenIsEmpty(t *testing.T) {
+	oldBaseURL := appleAccountManageBaseURL
+	defer func() { appleAccountManageBaseURL = oldBaseURL }()
+
+	var paths []string
+	tokenCalls := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /account/manage/gs/ws/token":
+			tokenCalls++
+			if tokenCalls == 1 {
+				if r.Header.Get("scnt") != "start-scnt" {
+					t.Fatalf("first token scnt header = %q, want start-scnt", r.Header.Get("scnt"))
+				}
+				w.Header().Set("scnt", "token-empty-scnt")
+				_, _ = w.Write([]byte(`{}`))
+				return
+			}
+			if r.Header.Get("scnt") != "" {
+				t.Fatalf("second token scnt header = %q, want empty like browser refresh", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "token-refreshed-scnt")
+			_, _ = w.Write([]byte(`{}`))
+		case "GET /account/manage/section/privacy":
+			if r.Header.Get("scnt") != "" {
+				t.Fatalf("privacy page scnt header = %q, want empty", r.Header.Get("scnt"))
+			}
+			w.Header().Set("Content-Type", "text/html")
+			w.Header().Set("scnt", "page-scnt")
+			_, _ = w.Write([]byte(`<html></html>`))
+		case "GET /bootstrap/portal":
+			if r.Header.Get("scnt") != "" {
+				t.Fatalf("bootstrap scnt header = %q, want empty", r.Header.Get("scnt"))
+			}
+			_, _ = w.Write([]byte(`{"timeOutInterval":15}`))
+		case "GET /account/manage":
+			if r.Header.Get("scnt") != "token-refreshed-scnt" {
+				t.Fatalf("manage scnt header = %q, want token-refreshed-scnt", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "manage-scnt")
+			_, _ = w.Write([]byte(`{"apiKey":"account-key"}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer ts.Close()
+	appleAccountManageBaseURL = ts.URL
+
+	now := time.Now()
+	client := &ICloudClient{client: ts.Client()}
+	state, err := client.RefreshAppleAccountManageState(t.Context(), LoginState{
+		Kind:   LoginStateAppleAccount,
+		Origin: ts.URL,
+		Scnt:   "start-scnt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.APIKey != "account-key" || state.Scnt != "manage-scnt" || !state.LastCheckOK || !state.ManageExpiresAt.After(now) {
+		t.Fatalf("state = %+v, want api key, updated scnt, ok and bootstrap TTL", state)
+	}
+	wantPaths := []string{
+		"GET /account/manage/gs/ws/token",
+		"GET /account/manage/section/privacy",
+		"GET /bootstrap/portal",
+		"GET /account/manage/gs/ws/token",
+		"GET /account/manage",
+	}
+	if strings.Join(paths, "\n") != strings.Join(wantPaths, "\n") {
+		t.Fatalf("paths = %#v, want %#v", paths, wantPaths)
 	}
 }
 
@@ -797,6 +1003,7 @@ func TestICloudClientCreatePrivacyMailboxWithAppleAccountReusesFreshStateAfterFa
 			Scnt:              "recent-scnt",
 			APIKey:            "recent-key",
 			LastCheckedAt:     checkedAt,
+			ManageExpiresAt:   checkedAt.Add(15 * time.Minute),
 			LastCheckOK:       false,
 			LastStatusMessage: "新接口登录态异常：HTTP 404",
 		}},
@@ -838,7 +1045,7 @@ func TestICloudClientCreatePrivacyMailboxWithAppleAccountRefreshesAfterAuthFailu
 					t.Fatalf("first add api key header = %q, want old-key", r.Header.Get("X-Apple-Api-Key"))
 				}
 				w.WriteHeader(http.StatusUnauthorized)
-				_, _ = w.Write([]byte(`{"service_errors":[{"message":"expired"}]}`))
+				_, _ = w.Write([]byte(`{"service_errors":[{"message":"authentication_failed"}]}`))
 				return
 			}
 			if r.Header.Get("X-Apple-Api-Key") != "account-key" {
@@ -881,11 +1088,12 @@ func TestICloudClientCreatePrivacyMailboxWithAppleAccountRefreshesAfterAuthFailu
 	client := &ICloudClient{client: ts.Client()}
 	remote, updatedSession, err := client.CreatePrivacyMailboxWithAppleAccount(t.Context(), ICloudSession{
 		LoginStates: []LoginState{{
-			Kind:          LoginStateAppleAccount,
-			Scnt:          "scnt-old",
-			APIKey:        "old-key",
-			LastCheckedAt: time.Now(),
-			LastCheckOK:   true,
+			Kind:            LoginStateAppleAccount,
+			Scnt:            "scnt-old",
+			APIKey:          "old-key",
+			LastCheckedAt:   time.Now(),
+			ManageExpiresAt: time.Now().Add(15 * time.Minute),
+			LastCheckOK:     true,
 		}},
 	}, "", "LAB", "")
 	if err != nil {
@@ -907,6 +1115,86 @@ func TestICloudClientCreatePrivacyMailboxWithAppleAccountRefreshesAfterAuthFailu
 	}
 	updatedState, ok := appleAccountLoginState(updatedSession)
 	if !ok || updatedState.APIKey != "account-key" || updatedState.Scnt != "scnt-after-add" || !updatedState.LastCheckOK {
+		t.Fatalf("updated apple account state = %+v ok=%v, want refreshed state", updatedState, ok)
+	}
+}
+
+func TestICloudClientCreatePrivacyMailboxWithAppleAccountRefreshesAfterSessionTimeout(t *testing.T) {
+	oldBaseURL := appleAccountManageBaseURL
+	defer func() { appleAccountManageBaseURL = oldBaseURL }()
+
+	var paths []string
+	addCalls := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "POST /account/manage/email/private/add":
+			addCalls++
+			if addCalls == 1 {
+				w.WriteHeader(appleAccountHTTPStatusSessionTimeout)
+				_, _ = w.Write([]byte(`{"service_errors":[{"message":"session timeout"}]}`))
+				return
+			}
+			if r.Header.Get("X-Apple-Api-Key") != "account-key" {
+				t.Fatalf("retry add api key header = %q, want account-key", r.Header.Get("X-Apple-Api-Key"))
+			}
+			if r.Header.Get("scnt") != "scnt-after-manage" {
+				t.Fatalf("retry add scnt header = %q, want scnt-after-manage", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "scnt-after-add")
+			_, _ = w.Write([]byte(`{"emailAddress":"Timeout.Alias@icloud.com","active":false}`))
+		case "GET /account/manage/gs/ws/token":
+			w.Header().Set("scnt", "scnt-after-token")
+			_, _ = w.Write([]byte(`{"timeOutInterval":15}`))
+		case "GET /account/manage":
+			if r.Header.Get("scnt") != "scnt-after-token" {
+				t.Fatalf("manage scnt header = %q, want scnt-after-token", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "scnt-after-manage")
+			_, _ = w.Write([]byte(`{"apiKey":"account-key"}`))
+		case "PUT /account/manage/email/private/add/complete":
+			_, _ = w.Write([]byte(`{"emailAddress":"Timeout.Alias@icloud.com","id":"timeout123","active":true}`))
+		case "GET /account/manage/email/private/timeout123.em":
+			_, _ = w.Write([]byte(`{"emailAddress":"Timeout.Alias@icloud.com","id":"timeout123","active":true}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer ts.Close()
+	appleAccountManageBaseURL = ts.URL
+
+	now := time.Now()
+	client := &ICloudClient{client: ts.Client()}
+	remote, updatedSession, err := client.CreatePrivacyMailboxWithAppleAccount(t.Context(), ICloudSession{
+		LoginStates: []LoginState{{
+			Kind:            LoginStateAppleAccount,
+			Scnt:            "scnt-old",
+			APIKey:          "old-key",
+			LastCheckedAt:   now,
+			ManageExpiresAt: now.Add(15 * time.Minute),
+			LastCheckOK:     true,
+		}},
+	}, "", "LAB", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.Email != "timeout.alias@icloud.com" {
+		t.Fatalf("remote email = %q, want timeout.alias@icloud.com", remote.Email)
+	}
+	wantPaths := []string{
+		"POST /account/manage/email/private/add",
+		"GET /account/manage/gs/ws/token",
+		"GET /account/manage",
+		"POST /account/manage/email/private/add",
+		"PUT /account/manage/email/private/add/complete",
+		"GET /account/manage/email/private/timeout123.em",
+	}
+	if strings.Join(paths, "\n") != strings.Join(wantPaths, "\n") {
+		t.Fatalf("paths = %#v, want %#v", paths, wantPaths)
+	}
+	updatedState, ok := appleAccountLoginState(updatedSession)
+	if !ok || updatedState.APIKey != "account-key" || updatedState.Scnt != "scnt-after-add" || !updatedState.LastCheckOK || !updatedState.ManageExpiresAt.After(now) {
 		t.Fatalf("updated apple account state = %+v ok=%v, want refreshed state", updatedState, ok)
 	}
 }
@@ -1001,6 +1289,7 @@ func TestCheckSavedLoginStatesKeepsRecentlyHealthyAppleAccountState(t *testing.T
 			APIKey:            "fresh-key",
 			LastCheckOK:       true,
 			LastCheckedAt:     now.Add(-time.Minute),
+			ManageExpiresAt:   now.Add(14 * time.Minute),
 			LastStatusMessage: "新接口登录态正常",
 		}},
 	}, now)
@@ -3370,7 +3659,7 @@ func TestMailboxSchedulerFallsBackToOldInterfaceAfterNewInterfaceFails(t *testin
 	}
 }
 
-func TestCreateAppleAccountMailboxSavesRefreshedStateWhenCreateFails(t *testing.T) {
+func TestCreateAppleAccountMailboxKeepsRefreshedStateWhenCreateFails(t *testing.T) {
 	oldBaseURL := appleAccountManageBaseURL
 	defer func() { appleAccountManageBaseURL = oldBaseURL }()
 
@@ -3447,11 +3736,18 @@ func TestCreateAppleAccountMailboxSavesRefreshedStateWhenCreateFails(t *testing.
 	}
 	got := store.ICloudSessionsForOwner(ownerID)[0]
 	state, ok := appleAccountLoginState(got)
-	if !ok || state.Scnt != "fresh-failed-scnt" || state.APIKey != "fresh-key" {
-		t.Fatalf("saved apple account state = %+v ok=%v, want refreshed state after failed create", state, ok)
+	if !ok || state.Scnt != "fresh-manage-scnt" || state.APIKey != "fresh-key" {
+		t.Fatalf("saved apple account state = %+v ok=%v, want last successful refreshed state after failed create", state, ok)
 	}
-	if cookie := cookieHeader(state.Cookies, ts.URL+"/account/manage/email/private/add"); !strings.Contains(cookie, "fail-cookie=ok") {
-		t.Fatalf("saved cookie header = %q, want failed response cookie saved", cookie)
+	cookie := cookieHeader(state.Cookies, ts.URL+"/account/manage/email/private/add")
+	if strings.Contains(cookie, "fail-cookie=ok") {
+		t.Fatalf("saved cookie header = %q, want failed response cookie ignored", cookie)
+	}
+	if !strings.Contains(cookie, "manage-cookie=ok") {
+		t.Fatalf("saved cookie header = %q, want last successful manage cookie", cookie)
+	}
+	if remaining := server.mailboxCreateCooldownRemaining(ownerID + ":" + session.AccountID); remaining <= 0 {
+		t.Fatalf("apple account cooldown remaining = %v, want positive", remaining)
 	}
 	wantPaths := []string{
 		"GET /account/manage/gs/ws/token",
@@ -3661,6 +3957,61 @@ func TestCreateICloudMailboxUsesSelectedSavedSessions(t *testing.T) {
 	}
 	if createdAccounts[sessions[1].AccountID] {
 		t.Fatalf("unselected account %q was used", sessions[1].AccountID)
+	}
+}
+
+func TestCreateICloudMailboxResponseIncludesCreateChannel(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
+	server := handler.(*Server)
+	cookie, user := registerTestUser(t, handler, "create-channel", "multi123")
+	session := ICloudSession{
+		OwnerID:      user.ID,
+		AppleID:      "channel@example.com",
+		DSID:         "dsid-channel",
+		IsICloudPlus: true,
+		CanCreateHME: true,
+		Cookies:      []SessionCookie{{Name: "a", Value: "1"}},
+	}
+	if err := store.SaveICloudSessionForOwner(user.ID, session); err != nil {
+		t.Fatal(err)
+	}
+	server.createMailboxForOwner = func(ctx context.Context, ownerID, accountID, label, note string) (Mailbox, ICloudRemoteMailbox, error) {
+		mailbox, err := store.AddMailboxForOwner(ownerID, accountID, label, "created@example.icloud.com")
+		if err != nil {
+			return Mailbox{}, ICloudRemoteMailbox{}, err
+		}
+		return mailbox, ICloudRemoteMailbox{Email: mailbox.Email, Label: mailbox.Label, IsActive: true, Origin: "APPLE_ACCOUNT"}, nil
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/icloud/mailboxes/create", strings.NewReader(`{"label":"SOURCE"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Created   int             `json:"created"`
+		Mailboxes []publicMailbox `json:"mailboxes"`
+		Remotes   []struct {
+			Origin       string `json:"origin"`
+			Channel      string `json:"channel"`
+			ChannelLabel string `json:"channel_label"`
+		} `json:"remotes"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Created != 1 || len(body.Mailboxes) != 1 || len(body.Remotes) != 1 {
+		t.Fatalf("body = %+v, want one created mailbox and remote", body)
+	}
+	if body.Mailboxes[0].CreateChannel != string(mailboxCreateChannelAppleAccount) || body.Mailboxes[0].CreateChannelLabel != "新接口" {
+		t.Fatalf("mailbox channel = %q/%q, want apple_account/新接口", body.Mailboxes[0].CreateChannel, body.Mailboxes[0].CreateChannelLabel)
+	}
+	if body.Remotes[0].Origin != "APPLE_ACCOUNT" || body.Remotes[0].Channel != string(mailboxCreateChannelAppleAccount) || body.Remotes[0].ChannelLabel != "新接口" {
+		t.Fatalf("remote channel = %+v, want APPLE_ACCOUNT apple_account 新接口", body.Remotes[0])
 	}
 }
 

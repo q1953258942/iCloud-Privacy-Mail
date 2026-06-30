@@ -654,15 +654,13 @@ func (c *AppleAuthClient) primeAppleAccountManageState(ctx context.Context, sess
 	}
 	tokenState := state
 	tokenState.Scnt = ""
-	err := client.callAppleAccount(ctx, &tokenState, "", http.MethodGet, "/account/manage/gs/ws/token", nil, &token)
-	state = tokenState
+	scnt, err := client.fetchAppleAccountManageTokenScnt(ctx, tokenState, &token)
 	if err != nil {
-		coded, ok := err.(codedError)
-		if !ok || coded.code != "apple_account_auth_failed" || strings.TrimSpace(state.Scnt) == "" {
+		if strings.TrimSpace(scnt) == "" {
 			return err
 		}
 	}
-	if scnt := strings.TrimSpace(state.Scnt); scnt != "" {
+	if scnt := strings.TrimSpace(scnt); scnt != "" {
 		session.ManageScnt = scnt
 	}
 	return nil
