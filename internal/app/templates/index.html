@@ -553,6 +553,10 @@
             <button id="stopScheduleButton" class="danger" onclick="stopMailboxScheduler()">停止定时创建</button>
             <span id="scheduleStatus" class="muted">定时创建未启动；刷新页面不会停止后台任务。</span>
           </div>
+          <div class="toolbar">
+            <button onclick="copyScheduleEvents()">复制定时日志</button>
+            <button class="danger" onclick="clearScheduleEvents()">清除定时日志</button>
+          </div>
           <div id="scheduleEvents" class="log mini-log">暂无定时创建记录。</div>
         </section>
 
@@ -605,6 +609,7 @@
           <div class="toolbar">
             <button onclick="refresh()">刷新状态</button>
             <button onclick="copyLog()">复制日志</button>
+            <button class="danger" onclick="clearLog()">清除日志</button>
           </div>
           <div id="log" class="log">等待操作...</div>
         </section>
@@ -774,7 +779,10 @@
     }
 
     function log(text) {
-      $('log').textContent = new Date().toLocaleTimeString() + ' ' + text + '\n' + $('log').textContent;
+      const el = $('log');
+      if (!el) return;
+      const current = el.textContent === '等待操作...' ? '' : el.textContent;
+      el.textContent = new Date().toLocaleTimeString() + ' ' + text + '\n' + current;
     }
 
     function boundedInt(id, fallback, min, max) {
@@ -1217,6 +1225,28 @@
       const data = await api('/api/icloud/scheduler/stop', {method:'POST', body:'{}'});
       renderMailboxScheduler(data.scheduler || {});
       log('定时创建已停止');
+    }
+
+    async function copyScheduleEvents() {
+      const el = $('scheduleEvents');
+      if (!el) return;
+      const text = el.textContent === '暂无定时创建记录。' ? '' : el.textContent;
+      try {
+        await writeClipboard(text);
+        log('已复制定时创建日志');
+      } catch (err) {
+        log('复制定时创建日志失败：' + err.message);
+      }
+    }
+
+    async function clearScheduleEvents() {
+      try {
+        const data = await api('/api/icloud/scheduler/logs/clear', {method:'POST', body:'{}'});
+        renderMailboxScheduler(data.scheduler || {});
+        log(data.message || '定时创建记录已清除');
+      } catch (err) {
+        log('清除定时创建日志失败：' + err.message);
+      }
     }
 
     function renderMailboxScheduler(scheduler, options = {}) {
@@ -1793,12 +1823,43 @@
     async function copyAPI(id) {
       const row = lastMailboxes.find(x => x.id === id);
       if (!row) return;
-      await navigator.clipboard.writeText(`${row.email || ''}----${row.api_url || ''}`);
+      await writeClipboard(`${row.email || ''}----${row.api_url || ''}`);
       log('已复制邮箱API：' + row.email);
     }
 
+    async function writeClipboard(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      textarea.style.top = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      const copied = document.execCommand('copy');
+      textarea.remove();
+      if (!copied) throw new Error('浏览器拒绝访问剪贴板');
+    }
+
     async function copyLog() {
-      await navigator.clipboard.writeText($('log').textContent);
+      const el = $('log');
+      if (!el) return;
+      const text = el.textContent === '等待操作...' ? '' : el.textContent;
+      try {
+        await writeClipboard(text);
+        log('已复制日志');
+      } catch (err) {
+        log('复制日志失败：' + err.message);
+      }
+    }
+
+    function clearLog() {
+      const el = $('log');
+      if (el) el.textContent = '等待操作...';
     }
 
     function esc(value) {

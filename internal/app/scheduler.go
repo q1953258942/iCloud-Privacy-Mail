@@ -211,6 +211,22 @@ func (s *Server) handleStopMailboxScheduler(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+func (s *Server) handleClearMailboxSchedulerLogs(w http.ResponseWriter, r *http.Request) {
+	ownerID := requestOwnerID(r, s.store)
+	if ownerID == "" {
+		writeError(w, http.StatusUnauthorized, errCode("auth_required", "请先登录账号", false))
+		return
+	}
+	if job := s.mailboxScheduler(ownerID); job != nil {
+		job.clearEvents()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":   true,
+		"message":   "定时创建记录已清除",
+		"scheduler": s.publicMailboxScheduler(r),
+	})
+}
+
 func (s *Server) runMailboxScheduler(ctx context.Context, ownerID string, job *mailboxSchedulerJob, cfg mailboxSchedulerConfig) {
 	defer func() {
 		job.mu.Lock()
@@ -530,6 +546,12 @@ func (j *mailboxSchedulerJob) snapshot() (mailboxSchedulerState, []mailboxSchedu
 	events := make([]mailboxSchedulerEvent, len(j.events))
 	copy(events, j.events)
 	return state, events
+}
+
+func (j *mailboxSchedulerJob) clearEvents() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.events = nil
 }
 
 func (j *mailboxSchedulerJob) addEventLocked(kind, message string, batch int, mailbox Mailbox, err error) {

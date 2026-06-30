@@ -205,6 +205,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/icloud/scheduler/status", s.handleMailboxSchedulerStatus)
 	s.mux.HandleFunc("POST /api/icloud/scheduler/start", s.handleStartMailboxScheduler)
 	s.mux.HandleFunc("POST /api/icloud/scheduler/stop", s.handleStopMailboxScheduler)
+	s.mux.HandleFunc("POST /api/icloud/scheduler/logs/clear", s.handleClearMailboxSchedulerLogs)
 	s.mux.HandleFunc("GET /api/accounts", s.handleListAccounts)
 	s.mux.HandleFunc("POST /api/accounts", s.handleCreateAccount)
 	s.mux.HandleFunc("GET /api/mailboxes", s.handleListMailboxes)
@@ -1156,7 +1157,7 @@ func (s *Server) handleSyncICloudMailboxes(w http.ResponseWriter, r *http.Reques
 func (s *Server) syncICloudMailboxesForSession(ctx context.Context, r *http.Request, ownerID string, session ICloudSession) (syncICloudMailboxResult, []publicMailbox, error) {
 	result := syncICloudMailboxResult{
 		AccountID: session.AccountID,
-		AppleID:   maskAppleID(session.AppleID),
+		AppleID:   strings.TrimSpace(session.AppleID),
 	}
 	remotes, err := NewICloudClient().ListPrivacyMailboxes(ctx, session)
 	if err != nil {
@@ -2158,7 +2159,7 @@ func (s *Server) createMailboxesForOwnerWithChannels(ctx context.Context, ownerI
 			}
 			failures = append(failures, createMailboxFailure{
 				AccountID: result.accountID,
-				AppleID:   maskAppleID(result.session.AppleID),
+				AppleID:   strings.TrimSpace(result.session.AppleID),
 				Channel:   string(result.channel),
 				Error:     result.err.Error(),
 			})
@@ -2583,7 +2584,8 @@ func (s *Server) allowsUserSession(r *http.Request) bool {
 			"/api/icloud/mailboxes/create",
 			"/api/icloud/mailboxes/sync",
 			"/api/icloud/scheduler/start",
-			"/api/icloud/scheduler/stop":
+			"/api/icloud/scheduler/stop",
+			"/api/icloud/scheduler/logs/clear":
 			return true
 		}
 	}
@@ -2848,7 +2850,7 @@ func (s *Server) publicAccount(account Account) publicAccount {
 		OwnerID:      account.OwnerID,
 		Owner:        s.ownerName(account.OwnerID),
 		Label:        account.Label,
-		AppleID:      maskAppleID(account.AppleID),
+		AppleID:      strings.TrimSpace(account.AppleID),
 		Status:       account.Status,
 		ICloudStatus: account.ICloudStatus,
 		Note:         account.Note,
@@ -2863,7 +2865,7 @@ func (s *Server) publicMailbox(r *http.Request, mailbox Mailbox) publicMailbox {
 	if strings.TrimSpace(mailbox.AccountID) != "" {
 		if account, ok := s.store.FindAccountByID(mailbox.AccountID); ok {
 			accountLabel = account.Label
-			accountAppleID = maskAppleID(account.AppleID)
+			accountAppleID = strings.TrimSpace(account.AppleID)
 		}
 	}
 	return publicMailbox{
@@ -2915,7 +2917,7 @@ func publicSession(session *ICloudSession) publicICloudSession {
 		Saved:                    true,
 		AccountID:                session.AccountID,
 		SavedAt:                  formatTime(session.SavedAt),
-		AppleID:                  maskAppleID(session.AppleID),
+		AppleID:                  strings.TrimSpace(session.AppleID),
 		DSIDMask:                 maskSecret(session.DSID, 4),
 		ClientBuildNumber:        session.ClientBuildNumber,
 		MasteringNumber:          session.MasteringNumber,
@@ -3009,9 +3011,9 @@ func appleAccountLoginSaved(session ICloudSession) bool {
 }
 
 func publicSessionForAppleID(sessions []publicICloudSession, appleID string) publicICloudSession {
-	masked := maskAppleID(appleID)
+	appleID = strings.TrimSpace(appleID)
 	for _, session := range sessions {
-		if masked != "" && session.AppleID == masked {
+		if appleID != "" && strings.EqualFold(strings.TrimSpace(session.AppleID), appleID) {
 			return session
 		}
 	}

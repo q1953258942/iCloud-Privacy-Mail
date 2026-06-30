@@ -421,6 +421,10 @@
           <div class="panel-head">
             <div><h2>运行日志</h2><p>最近操作。</p></div>
           </div>
+          <div class="actions" style="padding:14px 18px; border-top:1px solid rgba(118,143,174,.16);">
+            <button class="btn" onclick="copyLog()">复制日志</button>
+            <button class="btn danger" onclick="clearLog()">清除日志</button>
+          </div>
           <pre class="log" id="log">等待操作...</pre>
         </section>
       </main>
@@ -450,8 +454,42 @@
       return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
     function log(text) {
+      const el = $('log');
+      if (!el) return;
       const line = new Date().toLocaleTimeString() + ' ' + text;
-      $('log').textContent = line + '\n' + ($('log').textContent === '等待操作...' ? '' : $('log').textContent);
+      el.textContent = line + '\n' + (el.textContent === '等待操作...' ? '' : el.textContent);
+    }
+    async function writeClipboard(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      textarea.style.top = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      const copied = document.execCommand('copy');
+      textarea.remove();
+      if (!copied) throw new Error('浏览器拒绝访问剪贴板');
+    }
+    async function copyLog() {
+      const el = $('log');
+      if (!el) return;
+      const text = el.textContent === '等待操作...' ? '' : el.textContent;
+      try {
+        await writeClipboard(text);
+        log('已复制日志');
+      } catch (err) {
+        log('复制日志失败：' + err.message);
+      }
+    }
+    function clearLog() {
+      const el = $('log');
+      if (el) el.textContent = '等待操作...';
     }
     function pill(text, type='') {
       return `<span class="pill ${type}">${esc(text || '-')}</span>`;

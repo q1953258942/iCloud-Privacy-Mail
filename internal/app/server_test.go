@@ -407,6 +407,43 @@ func TestPublicSessionExposesPerLoginStateCheckStatus(t *testing.T) {
 	}
 }
 
+func TestPublicViewsExposeFullAppleID(t *testing.T) {
+	store := newTestStore(t)
+	server := &Server{cfg: Config{PublicBaseURL: "https://mail.example"}, store: store, logger: discardLogger()}
+	account, err := store.AddAccountForOwner("owner-full", "Main", "full.user@example.com", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := store.AddMailboxForOwner("owner-full", account.ID, "Alias", "alias@icloud.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gotAccount := server.publicAccount(account)
+	if gotAccount.AppleID != "full.user@example.com" {
+		t.Fatalf("public account AppleID = %q, want full email", gotAccount.AppleID)
+	}
+
+	gotMailbox := server.publicMailbox(httptest.NewRequest(http.MethodGet, "https://panel.example/", nil), mailbox)
+	if gotMailbox.AccountAppleID != "full.user@example.com" {
+		t.Fatalf("public mailbox account AppleID = %q, want full email", gotMailbox.AccountAppleID)
+	}
+
+	gotSession := publicSession(&ICloudSession{
+		SavedAt:   time.Now(),
+		AccountID: account.ID,
+		AppleID:   "session.user@example.com",
+	})
+	if gotSession.AppleID != "session.user@example.com" {
+		t.Fatalf("public session AppleID = %q, want full email", gotSession.AppleID)
+	}
+
+	matched := publicSessionForAppleID([]publicICloudSession{gotSession}, "session.user@example.com")
+	if matched.AppleID != gotSession.AppleID {
+		t.Fatalf("publicSessionForAppleID did not match full email: %+v", matched)
+	}
+}
+
 func TestStatusReturnsOwnerICloudSessionForAdminUser(t *testing.T) {
 	store := newTestStore(t)
 	handler := NewServer(Config{}, store, discardLogger())
@@ -2434,6 +2471,54 @@ func TestMailboxSchedulerStartsCreatesAndStops(t *testing.T) {
 	}
 	if status.Scheduler.Running {
 		t.Fatalf("scheduler still running after stop: %+v", status.Scheduler)
+	}
+}
+
+func TestMailboxSchedulerClearLogsKeepsCounters(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
+	server := handler.(*Server)
+	cookie, user := registerTestUser(t, handler, "timer-clear", "timer123")
+
+	job := &mailboxSchedulerJob{
+		nextEventID: 2,
+		state: mailboxSchedulerState{
+			OwnerID:         user.ID,
+			Owner:           user.Username,
+			BatchSize:       1,
+			IntervalSeconds: int(time.Hour.Seconds()),
+			Status:          "running",
+			Success:         3,
+			Failed:          1,
+		},
+		events: []mailboxSchedulerEvent{
+			{ID: 2, At: time.Now(), Type: "failed", Message: "失败记录", Batch: 1, Error: "额度已用完"},
+			{ID: 1, At: time.Now(), Type: "created", Message: "创建成功", Batch: 1, Email: "created@icloud.com"},
+		},
+	}
+	server.schedulerMu.Lock()
+	server.mailboxSchedulers[user.ID] = job
+	server.schedulerMu.Unlock()
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/icloud/scheduler/logs/clear", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("clear scheduler logs = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Scheduler publicMailboxScheduler `json:"scheduler"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Scheduler.Events) != 0 {
+		t.Fatalf("scheduler events after clear = %+v, want empty", body.Scheduler.Events)
+	}
+	if body.Scheduler.Success != 3 || body.Scheduler.Failed != 1 {
+		t.Fatalf("scheduler counters changed after clear: %+v", body.Scheduler)
 	}
 }
 

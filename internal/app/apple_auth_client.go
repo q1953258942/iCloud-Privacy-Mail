@@ -241,7 +241,7 @@ func (c *AppleAuthClient) StartAppleAccountManageLogin(ctx context.Context, appl
 			PendingID: pending.ID,
 			Needs2FA:  true,
 			Message:   message,
-			AppleID:   maskAppleID(appleID),
+			AppleID:   strings.TrimSpace(appleID),
 			ExpiresAt: pending.ExpiresAt,
 		}, nil
 	}
@@ -253,7 +253,7 @@ func (c *AppleAuthClient) StartAppleAccountManageLogin(ctx context.Context, appl
 		Session:  icloudSession,
 		Needs2FA: false,
 		Message:  "Apple Account 管理态登录成功",
-		AppleID:  maskAppleID(appleID),
+		AppleID:  strings.TrimSpace(appleID),
 	}, nil
 }
 
@@ -301,7 +301,7 @@ func (c *AppleAuthClient) startLoginOnHost(ctx context.Context, appleID, passwor
 			PendingID: pending.ID,
 			Needs2FA:  true,
 			Message:   message,
-			AppleID:   maskAppleID(appleID),
+			AppleID:   strings.TrimSpace(appleID),
 			ExpiresAt: pending.ExpiresAt,
 		}, nil
 	}
@@ -320,7 +320,7 @@ func (c *AppleAuthClient) startLoginOnHost(ctx context.Context, appleID, passwor
 			PendingID: pending.ID,
 			Needs2FA:  true,
 			Message:   "登录已进入二次验证；如果设备已弹码，请输入验证码继续",
-			AppleID:   maskAppleID(appleID),
+			AppleID:   strings.TrimSpace(appleID),
 			ExpiresAt: pending.ExpiresAt,
 		}, nil
 	}
@@ -328,7 +328,7 @@ func (c *AppleAuthClient) startLoginOnHost(ctx context.Context, appleID, passwor
 		Session:  icloudSession,
 		Needs2FA: false,
 		Message:  "Apple 协议登录成功，登录态已生成",
-		AppleID:  maskAppleID(appleID),
+		AppleID:  strings.TrimSpace(appleID),
 	}, nil
 }
 
