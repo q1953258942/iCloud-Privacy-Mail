@@ -544,6 +544,7 @@
             <button id="createICloudButton" class="primary" onclick="createICloudMailbox()">开始创建</button>
             <span id="protoBatchProgress" class="muted">每次点击会让当前勾选账号同时创建 1 轮，并记录本次成功/失败数量。</span>
           </div>
+          <div id="protoCreateDetails" class="log mini-log">暂无创建记录。</div>
           <div class="field-grid">
             <label class="full">定时间隔分钟<input id="scheduleIntervalMinutes" type="number" min="1" max="1440" value="60" placeholder="默认 60"></label>
           </div>
@@ -1615,6 +1616,7 @@
     async function createICloudMailbox() {
       const button = $('createICloudButton');
       const progress = $('protoBatchProgress');
+      const details = $('protoCreateDetails');
       let accountIDs;
       let accountNames;
       try {
@@ -1622,6 +1624,7 @@
         accountNames = selectedCreateAccountNames();
       } catch (err) {
         progress.textContent = err.message;
+        if (details) details.textContent = `创建未启动：${err.message}`;
         log('创建邮箱未启动：' + err.message);
         return;
       }
@@ -1630,6 +1633,7 @@
 
       button.disabled = true;
       progress.textContent = `创建中：参与账号=${accountNames}`;
+      if (details) details.textContent = `创建中：参与账号=${accountNames}`;
       log(`开始创建隐私邮箱：参与账号=${accountNames}`);
       try {
         const data = await api('/api/icloud/mailboxes/create', {method:'POST', body: JSON.stringify({
@@ -1646,14 +1650,37 @@
         mailboxes.forEach(mailbox => log(`创建成功：${mailbox.email}（${mailbox.account_label || mailbox.account_apple_id || mailbox.account_id || '未绑定账号'}）`));
         failures.forEach(failure => log(`账号创建失败：${failure.apple_id || failure.account_id || '-'}，${failure.error || '未知错误'}；本次只记录该账号失败，其他账号已继续`));
         progress.textContent = `本次创建完成：成功 ${mailboxes.length}，失败 ${failures.length}`;
+        renderCreateDetails(mailboxes, failures);
         log(`本次创建完成：成功 ${mailboxes.length}，失败 ${failures.length}`);
       } catch (err) {
         progress.textContent = `本次创建失败：${err.message}`;
+        if (details) details.textContent = `本次创建失败：${err.message}`;
         log('本次创建失败：' + err.message);
       } finally {
         button.disabled = false;
         await refresh();
       }
+    }
+
+    function renderCreateDetails(mailboxes, failures) {
+      const details = $('protoCreateDetails');
+      if (!details) return;
+      const lines = [`本次创建明细：成功 ${mailboxes.length}，失败 ${failures.length}`];
+      if (mailboxes.length > 0) {
+        lines.push('', '成功：');
+        mailboxes.forEach((mailbox, index) => {
+          const owner = mailbox.account_label || mailbox.account_apple_id || mailbox.account_id || '未绑定账号';
+          lines.push(`${index + 1}. ${mailbox.email || '-'} / ${owner}`);
+        });
+      }
+      if (failures.length > 0) {
+        lines.push('', '失败：');
+        failures.forEach((failure, index) => {
+          const account = failure.apple_id || failure.account_id || '未知账号';
+          lines.push(`${index + 1}. ${account} / ${failure.error || '未知错误'}`);
+        });
+      }
+      details.textContent = lines.join('\n');
     }
 
     async function verifyMailbox(id) {
