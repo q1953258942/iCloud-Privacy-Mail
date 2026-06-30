@@ -6,29 +6,179 @@
   <title>iCloud Privacy Mail</title>
   <style>
     :root {
-      --bg: #f6f8fb;
-      --bg-soft: #f8fafc;
-      --panel: #fff;
-      --panel-2: #f8fafc;
+      color-scheme: light;
+      --surface-rgb: 255 255 255;
+      --bg: #f3f7f9;
+      --bg-soft: #f8fbfb;
+      --panel: #ffffff;
+      --panel-2: #f4f8fa;
+      --card: #ffffff;
       --ink: #101828;
       --ink-soft: #1f314e;
+      --text: #07182f;
+      --muted: #51677f;
+      --faint: #8492a6;
       --line: rgba(117, 133, 163, .22);
       --line-strong: rgba(117, 133, 163, .38);
-      --text: #071832;
-      --muted: #526782;
-      --faint: #8290a8;
       --green: #13b8a6;
-      --green-2: #059b87;
+      --green-2: #0a9e8c;
+      --on-accent: #ffffff;
       --amber: #b7791f;
       --red: #dc2626;
+      --count-bg: #e7eef5;
+      --th-bg: #f3f9fb;
+      --log-bg: #f4f8fa;
+      --log-ink: #334155;
+      --ok: #047857;
+      --ok-soft: rgba(209, 250, 229, .72);
+      --ok-line: rgba(16, 185, 129, .26);
+      --warn: #a16207;
+      --warn-soft: #fff7e6;
+      --warn-line: rgba(180, 83, 9, .24);
+      --bad: #b91c1c;
+      --bad-soft: #fff1f1;
+      --bad-line: rgba(220, 38, 38, .22);
       --shadow: 0 14px 36px rgba(16, 24, 40, .06);
+      --shadow-strong: 0 28px 72px rgba(16, 24, 40, .12);
+      --focus-ring: rgba(19, 184, 166, .16);
+      --soft-glass: rgb(var(--surface-rgb) / .68);
+      --glass: rgb(var(--surface-rgb) / .56);
+      --glass-strong: rgb(var(--surface-rgb) / .92);
+      --glass-soft: rgb(var(--surface-rgb) / .5);
+      --glass-hi: rgb(var(--surface-rgb) / .72);
+      --glass-line: rgb(var(--surface-rgb) / .62);
+      --sidebar-bg: rgb(var(--surface-rgb) / .9);
+      --head-bg: rgb(var(--surface-rgb) / .86);
+      --input-bg: rgb(var(--surface-rgb) / .9);
+    }
+    body[data-theme="sky"] {
+      --surface-rgb: 255 255 255;
+      --bg: #eef4fc; --bg-soft: #f6faff; --panel: #ffffff; --card: #ffffff;
+      --text: #0a1b35; --ink: #0f1f3d; --ink-soft: #243b63; --muted: #4f6488; --faint: #7c8fb0;
+      --line: rgba(91, 129, 186, .22); --line-strong: rgba(91, 129, 186, .38);
+      --green: #3b82f6; --green-2: #2563eb; --on-accent: #ffffff;
+      --count-bg: #e4ecfb; --th-bg: #eef4ff; --log-bg: #f1f6fe; --log-ink: #33415a;
+      --ok: #047857; --ok-soft: rgba(209, 250, 229, .72); --ok-line: rgba(16, 185, 129, .26);
+      --warn: #a16207; --warn-soft: #fff7e6; --warn-line: rgba(180, 83, 9, .24);
+      --bad: #b91c1c; --bad-soft: #fff1f1; --bad-line: rgba(220, 38, 38, .22);
+      --shadow: 0 16px 42px rgba(37, 99, 235, .08); --shadow-strong: 0 30px 78px rgba(37, 99, 235, .15);
+      --focus-ring: rgba(37, 99, 235, .16);
+    }
+    body[data-theme="graphite"] {
+      --surface-rgb: 255 255 255;
+      --bg: #f1f2f4; --bg-soft: #f8f9fa; --panel: #ffffff; --card: #ffffff;
+      --text: #14181f; --ink: #1a1f27; --ink-soft: #313a47; --muted: #5b6675; --faint: #8a93a1;
+      --line: rgba(90, 96, 108, .22); --line-strong: rgba(90, 96, 108, .38);
+      --green: #64748b; --green-2: #475569; --on-accent: #ffffff;
+      --count-bg: #e9ebef; --th-bg: #f3f4f6; --log-bg: #f3f4f6; --log-ink: #313a47;
+      --ok: #047857; --ok-soft: rgba(209, 250, 229, .72); --ok-line: rgba(16, 185, 129, .26);
+      --warn: #a16207; --warn-soft: #fff7e6; --warn-line: rgba(180, 83, 9, .24);
+      --bad: #b91c1c; --bad-soft: #fff1f1; --bad-line: rgba(220, 38, 38, .22);
+      --shadow: 0 14px 38px rgba(15, 23, 42, .07); --shadow-strong: 0 28px 70px rgba(15, 23, 42, .14);
+      --focus-ring: rgba(71, 85, 105, .16);
+    }
+    body[data-theme="sunset"] {
+      --surface-rgb: 255 252 249;
+      --bg: #fbf4ee; --bg-soft: #fef9f4; --panel: #fffdfb; --card: #fffdfb;
+      --text: #2a1505; --ink: #2e1a0a; --ink-soft: #4a2f18; --muted: #7c5a3e; --faint: #ac8d72;
+      --line: rgba(180, 120, 70, .20); --line-strong: rgba(180, 120, 70, .36);
+      --green: #fb7338; --green-2: #ea580c; --on-accent: #ffffff;
+      --count-bg: #f7e7d8; --th-bg: #fdf2e8; --log-bg: #fbf3eb; --log-ink: #5a4633;
+      --ok: #047857; --ok-soft: rgba(209, 250, 229, .66); --ok-line: rgba(16, 185, 129, .26);
+      --warn: #b45309; --warn-soft: rgba(255, 237, 213, .78); --warn-line: rgba(180, 83, 9, .26);
+      --bad: #c0341d; --bad-soft: rgba(255, 235, 228, .82); --bad-line: rgba(220, 60, 38, .24);
+      --shadow: 0 14px 36px rgba(120, 60, 20, .08); --shadow-strong: 0 28px 72px rgba(120, 60, 20, .16);
+      --focus-ring: rgba(251, 115, 56, .18);
+    }
+    body[data-theme="violet"] {
+      --surface-rgb: 252 251 255;
+      --bg: #f4f2fb; --bg-soft: #faf8ff; --panel: #ffffff; --card: #fdfcff;
+      --text: #190b33; --ink: #1a1330; --ink-soft: #2c2350; --muted: #5d5478; --faint: #948db0;
+      --line: rgba(124, 108, 160, .22); --line-strong: rgba(124, 108, 160, .38);
+      --green: #7c6cf0; --green-2: #6d28d9; --on-accent: #ffffff;
+      --count-bg: #ece8f8; --th-bg: #f5f2fd; --log-bg: #f6f3fc; --log-ink: #3a3357;
+      --ok: #047857; --ok-soft: rgba(209, 250, 229, .72); --ok-line: rgba(16, 185, 129, .26);
+      --warn: #a16207; --warn-soft: #fff7e6; --warn-line: rgba(180, 83, 9, .24);
+      --bad: #b91c1c; --bad-soft: #fff1f1; --bad-line: rgba(220, 38, 38, .22);
+      --shadow: 0 14px 36px rgba(45, 27, 90, .08); --shadow-strong: 0 28px 72px rgba(45, 27, 90, .16);
+      --focus-ring: rgba(124, 108, 160, .20);
+    }
+    body[data-theme="rose"] {
+      --surface-rgb: 255 251 252;
+      --bg: #faf2f5; --bg-soft: #fef7f9; --panel: #ffffff; --card: #fffafc;
+      --text: #2a0a18; --ink: #2e1020; --ink-soft: #4d1f37; --muted: #7d5060; --faint: #ad8693;
+      --line: rgba(163, 117, 137, .22); --line-strong: rgba(163, 117, 137, .40);
+      --green: #f43f6e; --green-2: #e11d62; --on-accent: #ffffff;
+      --count-bg: #f7e7ee; --th-bg: #fdf3f7; --log-bg: #fbf4f7; --log-ink: #4d3543;
+      --ok: #047857; --ok-soft: rgba(209, 250, 229, .72); --ok-line: rgba(16, 185, 129, .26);
+      --warn: #a16207; --warn-soft: #fff7e6; --warn-line: rgba(180, 83, 9, .24);
+      --bad: #b91c1c; --bad-soft: #fff1f1; --bad-line: rgba(220, 38, 38, .22);
+      --shadow: 0 14px 36px rgba(72, 16, 40, .07); --shadow-strong: 0 28px 72px rgba(72, 16, 40, .14);
+      --focus-ring: rgba(225, 29, 98, .18);
+    }
+    body[data-theme="forest"] {
+      --surface-rgb: 251 254 252;
+      --bg: #eef4f0; --bg-soft: #f4faf6; --panel: #ffffff; --card: #ffffff;
+      --text: #06251a; --ink: #0d2a1f; --ink-soft: #1d4234; --muted: #4a6a5b; --faint: #7f9a8c;
+      --line: rgba(96, 140, 118, .22); --line-strong: rgba(96, 140, 118, .38);
+      --green: #10b981; --green-2: #047857; --on-accent: #ffffff;
+      --count-bg: #e4efe8; --th-bg: #eff8f2; --log-bg: #f1f7f3; --log-ink: #2f4a3d;
+      --ok: #047857; --ok-soft: rgba(209, 250, 229, .72); --ok-line: rgba(16, 185, 129, .26);
+      --warn: #a16207; --warn-soft: #fff7e6; --warn-line: rgba(180, 83, 9, .24);
+      --bad: #b91c1c; --bad-soft: #fff1f1; --bad-line: rgba(220, 38, 38, .22);
+      --shadow: 0 14px 36px rgba(6, 37, 26, .07); --shadow-strong: 0 28px 72px rgba(6, 37, 26, .13);
+      --focus-ring: rgba(16, 185, 129, .16);
+    }
+    body[data-theme="midnight"] {
+      color-scheme: dark;
+      --surface-rgb: 44 56 82;
+      --bg: #0b1220; --bg-soft: #0f1830; --panel: #161f33; --card: #1d2740;
+      --text: #eaf0fb; --ink: #dde6f6; --ink-soft: #c2cfe6; --muted: #94a6c4; --faint: #6b7b99;
+      --line: rgba(148, 176, 224, .18); --line-strong: rgba(148, 176, 224, .34); --glass-line: rgba(186, 210, 248, .14);
+      --green: #38bdf8; --green-2: #0ea5e9; --on-accent: #06223a;
+      --count-bg: #1c2742; --th-bg: #141d31; --log-bg: #0e1729; --log-ink: #aebfd9;
+      --ok: #34d399; --ok-soft: rgba(16, 185, 129, .16); --ok-line: rgba(52, 211, 153, .30);
+      --warn: #fbbf24; --warn-soft: rgba(245, 158, 11, .16); --warn-line: rgba(251, 191, 36, .30);
+      --bad: #f87171; --bad-soft: rgba(239, 68, 68, .16); --bad-line: rgba(248, 113, 113, .30);
+      --shadow: 0 14px 36px rgba(0, 0, 0, .5); --shadow-strong: 0 28px 72px rgba(0, 0, 0, .62);
+      --focus-ring: rgba(56, 189, 248, .32);
+    }
+    body[data-theme="obsidian"] {
+      color-scheme: dark;
+      --surface-rgb: 48 53 64;
+      --bg: #0c0e12; --bg-soft: #111420; --panel: #16181f; --card: #1c1f27;
+      --text: #f2f4f8; --ink: #e6eaf2; --ink-soft: #c2c9d6; --muted: #8b97a9; --faint: #5d6a7c;
+      --line: rgba(168, 184, 210, .14); --line-strong: rgba(168, 184, 210, .26); --glass-line: rgba(200, 212, 232, .10);
+      --green: #22d3ee; --green-2: #06b6d4; --on-accent: #062a32;
+      --count-bg: #232735; --th-bg: #1a1e28; --log-bg: #0e1117; --log-ink: #aeb8c8;
+      --ok: #34d399; --ok-soft: rgba(16, 185, 129, .14); --ok-line: rgba(52, 211, 153, .30);
+      --warn: #fbbf24; --warn-soft: rgba(245, 158, 11, .14); --warn-line: rgba(251, 191, 36, .30);
+      --bad: #f87171; --bad-soft: rgba(239, 68, 68, .14); --bad-line: rgba(248, 113, 113, .32);
+      --shadow: 0 14px 36px rgba(0, 0, 0, .55); --shadow-strong: 0 28px 72px rgba(0, 0, 0, .68);
+      --focus-ring: rgba(34, 211, 238, .30);
+    }
+    body[data-theme="aurora"] {
+      color-scheme: dark;
+      --surface-rgb: 40 60 64;
+      --bg: #08161a; --bg-soft: #0c1f22; --panel: #102528; --card: #163133;
+      --text: #e8f6f3; --ink: #d3ebe6; --ink-soft: #aecfca; --muted: #84a8a4; --faint: #5f7f7d;
+      --line: rgba(180, 224, 216, .16); --line-strong: rgba(180, 224, 216, .30); --glass-line: rgba(180, 224, 216, .14);
+      --green: #2dd4bf; --green-2: #14b8a6; --on-accent: #04201b;
+      --count-bg: #15302f; --th-bg: #122a2c; --log-bg: #0a1c1e; --log-ink: #9cc4bf;
+      --ok: #34d399; --ok-soft: rgba(16, 185, 129, .16); --ok-line: rgba(52, 211, 153, .30);
+      --warn: #fbbf24; --warn-soft: rgba(180, 120, 9, .16); --warn-line: rgba(251, 191, 36, .28);
+      --bad: #fb7185; --bad-soft: rgba(220, 38, 38, .16); --bad-line: rgba(251, 113, 133, .30);
+      --shadow: 0 14px 36px rgba(0, 0, 0, .42); --shadow-strong: 0 28px 72px rgba(0, 0, 0, .5);
+      --focus-ring: rgba(45, 212, 191, .30);
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       min-height: 100vh;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: var(--bg);
+      background:
+        linear-gradient(135deg, rgb(var(--surface-rgb) / .55) 0, rgb(var(--surface-rgb) / 0) 36%),
+        linear-gradient(180deg, var(--bg-soft) 0, var(--bg) 420px, var(--bg) 100%);
       color: var(--text);
     }
     button, input, textarea, select { font: inherit; }
@@ -36,66 +186,75 @@
       width: 100%;
       min-height: 100vh;
       display: grid;
-      grid-template-columns: 272px minmax(0, 1fr);
-      gap: 0;
+      grid-template-columns: 286px minmax(0, 1fr);
+      gap: 14px;
+      padding: 14px;
     }
     .sidebar {
       position: sticky;
-      top: 0;
-      height: 100vh;
+      top: 14px;
+      height: calc(100vh - 28px);
       overflow: auto;
-      padding: 20px 14px;
-      background: #fff;
+      padding: 14px;
+      background: var(--sidebar-bg);
+      backdrop-filter: blur(18px);
       color: var(--text);
-      border-right: 1px solid #d9e2ec;
-      box-shadow: 10px 0 28px rgba(16, 24, 40, .04);
+      border: 1px solid var(--glass-line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
     }
-    .brand { display: grid; gap: 6px; padding: 0 10px 16px; }
+    .brand {
+      display: grid;
+      gap: 6px;
+      padding: 14px;
+      margin-bottom: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: linear-gradient(180deg, rgb(var(--surface-rgb) / .9), rgb(var(--surface-rgb) / .56));
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35);
+    }
     h1 { margin: 0; font-size: 22px; line-height: 1.12; letter-spacing: 0; }
     h2 { margin: 0; font-size: 18px; letter-spacing: 0; }
     .sub { color: var(--muted); margin-top: 7px; line-height: 1.6; }
     .sidebar .sub { color: var(--muted); margin-top: 0; font-size: 13px; }
     .eyebrow { color: var(--green); font-size: 12px; font-weight: 900; letter-spacing: 0; text-transform: uppercase; margin: 0; }
-    .user-box {
-      display: grid;
-      gap: 10px;
-      padding: 12px;
-      margin-bottom: 14px;
-      border: 1px solid #d9e2ec;
-      border-radius: 8px;
-      background: #f8fafc;
-    }
     .user-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .sidebar button.ghost {
-      color: var(--ink-soft);
-      border-color: #cbd5e1;
-      background: #fff;
-      white-space: normal;
-    }
-    .sidebar .user-badge {
-      overflow-wrap: anywhere;
-      cursor: default;
-    }
-    .side-nav { display: grid; gap: 8px; padding: 6px 0 14px; }
+    .side-nav { display: grid; gap: 9px; padding: 4px 0; }
     .nav-item {
       width: 100%;
-      display: flex;
+      display: grid;
+      grid-template-columns: 28px 1fr auto;
       align-items: center;
-      justify-content: space-between;
-      border-color: transparent;
-      background: transparent;
+      gap: 9px;
+      border-color: var(--line);
+      background: var(--glass-soft);
       color: var(--ink-soft);
       text-align: left;
-      padding: 11px 12px;
+      padding: 10px;
       border-radius: 8px;
       font-weight: 800;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .28);
     }
-    .nav-item:hover { background: #eef7f4; color: var(--text); transform: none; }
+    .nav-item::before {
+      content: "";
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      background:
+        linear-gradient(135deg, color-mix(in srgb, var(--green) 22%, var(--card)), rgb(var(--surface-rgb) / .7));
+      border: 1px solid color-mix(in srgb, var(--green) 20%, transparent);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35);
+    }
+    .nav-item:hover { background: var(--glass-strong); color: var(--text); transform: none; }
     .nav-item.active {
-      color: #064e49;
-      background: #ddfbf4;
-      border-color: rgba(19, 184, 166, .35);
-      box-shadow: inset 3px 0 0 var(--green);
+      color: var(--on-accent);
+      background: linear-gradient(135deg, var(--green), var(--green-2));
+      border-color: transparent;
+      box-shadow: 0 12px 28px color-mix(in srgb, var(--green) 22%, transparent);
+    }
+    .nav-item.active::before {
+      background: rgba(255,255,255,.22);
+      border-color: rgba(255,255,255,.36);
     }
     .nav-item .count-dot {
       min-width: 24px;
@@ -106,47 +265,213 @@
       justify-content: center;
       border-radius: 999px;
       color: var(--muted);
-      background: #e9eef5;
+      background: var(--count-bg);
       font-size: 12px;
     }
-    .nav-item.active .count-dot { color: #fff; background: var(--green-2); }
-    .side-tools {
+    .nav-item.active .count-dot { color: var(--green-2); background: rgba(255,255,255,.88); }
+    .tool-panel-grid {
       display: grid;
-      gap: 10px;
-      padding: 14px 0 0;
-      border-top: 1px solid #d9e2ec;
+      grid-template-columns: repeat(3, minmax(220px, 1fr));
+      gap: 12px;
+      padding: 16px 18px;
     }
-    .side-tools-title { color: var(--muted); font-size: 12px; font-weight: 900; }
-    .side-tools select, .side-tools button, .user-box button { width: 100%; }
+    .tool-panel-group {
+      display: grid;
+      gap: 8px;
+      align-content: start;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--soft-glass);
+    }
+    .tool-panel-label { color: var(--faint); font-size: 12px; font-weight: 900; }
+    .tool-panel-group select, .tool-panel-group button { width: 100%; }
     .tool-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .hero-actions select.export-format, .toolbar select.export-format, .side-tools select.export-format { width: 100%; min-width: 0; padding: 10px 12px; }
-    .hero-actions select.export-account, .toolbar select.export-account, .side-tools select.export-account { width: 100%; min-width: 0; max-width: none; padding: 10px 12px; }
-    .content { min-width: 0; display: grid; grid-template-rows: auto 1fr; }
+    .hero-actions select.export-format, .toolbar select.export-format { width: 100%; min-width: 0; padding: 10px 12px; }
+    .hero-actions select.export-account, .toolbar select.export-account { width: 100%; min-width: 0; max-width: none; padding: 10px 12px; }
+    .content { min-width: 0; display: grid; grid-template-rows: auto 1fr auto; gap: 14px; }
     .content-head {
       position: sticky;
-      top: 0;
+      top: 14px;
       z-index: 8;
       display: flex;
       justify-content: space-between;
       gap: 18px;
       align-items: center;
       padding: 18px 24px;
-      border-bottom: 1px solid var(--line);
-      background: rgba(255, 255, 255, .9);
+      border: 1px solid var(--glass-line);
+      border-radius: 8px;
+      background: var(--head-bg);
       backdrop-filter: blur(18px);
+      box-shadow: var(--shadow);
     }
     .content-head .sub { margin-top: 5px; }
-    .content-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
-    .content-main { padding: 20px 24px 34px; }
+    .content-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 10px; }
+    .appearance-controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .segmented {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--soft-glass);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .4);
+    }
+    .segmented button {
+      min-height: 30px;
+      padding: 6px 10px;
+      border: 0;
+      border-radius: 999px;
+      color: var(--muted);
+      background: transparent;
+      font-size: 12px;
+      font-weight: 900;
+    }
+    .segmented button:hover { transform: none; background: var(--glass); }
+    .segmented button.active {
+      color: var(--on-accent);
+      background: linear-gradient(135deg, var(--green), var(--green-2));
+      box-shadow: 0 8px 18px rgba(16, 24, 40, .12);
+    }
+    .theme-select {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 5px 4px 13px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--soft-glass);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .4);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+    }
+    .theme-select > span { white-space: nowrap; }
+    .theme-select select {
+      width: auto;
+      min-width: 124px;
+      padding: 7px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .account-dock {
+      min-width: 240px;
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 8px;
+      align-items: center;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--soft-glass);
+      box-shadow: var(--shadow);
+    }
+    .user-badge {
+      min-width: 0;
+      padding: 0 6px;
+      color: var(--ink-soft);
+      font-size: 13px;
+      font-weight: 900;
+      overflow-wrap: anywhere;
+      line-height: 1.35;
+    }
+    .account-dock button {
+      padding: 8px 11px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 800;
+    }
+    .content-main { padding: 0; }
+    .global-log-panel {
+      margin: 0;
+    }
+    .global-log-panel[hidden] { display: none; }
+    .log-panel-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+    .log-tabs {
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .log-tabs button {
+      padding: 7px 11px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 900;
+    }
+    .log-tabs button.active {
+      color: var(--on-accent);
+      border-color: transparent;
+      background: linear-gradient(135deg, var(--green), var(--green-2));
+    }
+    .global-log { min-height: 260px; max-height: 380px; }
+    .quick-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(160px, 1fr));
+      gap: 12px;
+    }
+    .quick-card {
+      min-height: 116px;
+      display: grid;
+      align-content: space-between;
+      gap: 12px;
+      padding: 15px;
+      border: 1px solid var(--glass-line);
+      border-radius: 8px;
+      background:
+        linear-gradient(145deg, rgb(var(--surface-rgb) / .92), rgb(var(--surface-rgb) / .56)),
+        color-mix(in srgb, var(--green) 6%, var(--card));
+      box-shadow: var(--shadow);
+      text-align: left;
+    }
+    .quick-card:hover {
+      background:
+        linear-gradient(145deg, rgb(var(--surface-rgb) / .98), rgb(var(--surface-rgb) / .64)),
+        color-mix(in srgb, var(--green) 11%, var(--card));
+      box-shadow: var(--shadow-strong);
+    }
+    .quick-card strong { font-size: 16px; }
+    .quick-card span { color: var(--muted); font-size: 12px; line-height: 1.5; white-space: normal; }
+    .quick-card i {
+      width: 32px;
+      height: 32px;
+      display: inline-flex;
+      border-radius: 8px;
+      background: linear-gradient(135deg, var(--green), var(--green-2));
+      box-shadow: 0 12px 24px color-mix(in srgb, var(--green) 20%, transparent);
+    }
     .view-section { display: none; }
     .view-section.active { display: block; }
-    .grid { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 14px; margin-bottom: 18px; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 14px; margin-bottom: 14px; }
     .card {
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 18px;
-      background: #fff;
+      background: linear-gradient(145deg, rgb(var(--surface-rgb) / .94), rgb(var(--surface-rgb) / .62));
       box-shadow: var(--shadow);
+      position: relative;
+      overflow: hidden;
+    }
+    .card::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto;
+      height: 4px;
+      background: linear-gradient(90deg, var(--green), color-mix(in srgb, var(--green) 8%, var(--card)));
+      opacity: .7;
     }
     .card strong { display: block; color: var(--text); font-size: 34px; line-height: 1; margin-bottom: 10px; letter-spacing: 0; }
     .card span { color: var(--muted); font-size: 13px; }
@@ -157,13 +482,14 @@
       border: 1px solid var(--line);
       border-radius: 8px;
       overflow: hidden;
-      background: var(--panel);
+      background: linear-gradient(145deg, rgb(var(--surface-rgb) / .92), rgb(var(--surface-rgb) / .68));
       box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
     }
     .panel-head {
       padding: 17px 18px 14px;
       border-bottom: 1px solid var(--line);
-      background: #fff;
+      background: rgb(var(--surface-rgb) / .58);
     }
     .panel-head p { margin: 5px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
     .toolbar, .form { display: flex; flex-wrap: wrap; gap: 10px; padding: 16px 18px; align-items: end; }
@@ -176,27 +502,27 @@
       gap: 8px;
       overflow-x: auto;
       padding: 10px 18px;
-      border-top: 1px solid rgba(118, 143, 174, .12);
-      border-bottom: 1px solid rgba(118, 143, 174, .12);
-      background: rgba(248, 251, 255, .56);
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      background: var(--soft-glass);
     }
     .account-tabs button, .session-tabs button {
       flex: 0 0 auto;
       padding: 8px 11px;
       border-radius: 8px;
       color: var(--muted);
-      background: rgba(255, 255, 255, .84);
+      background: rgb(var(--surface-rgb) / .84);
     }
     .account-tabs button.active, .session-tabs button.active {
-      color: #fff;
+      color: var(--on-accent);
       border-color: transparent;
-      background: linear-gradient(135deg, #13b8a6, #17c9ae);
-      box-shadow: 0 10px 22px rgba(19, 184, 166, .16);
+      background: linear-gradient(135deg, var(--green), var(--green-2));
+      box-shadow: 0 10px 22px color-mix(in srgb, var(--green) 16%, transparent);
     }
     .session-card {
       padding-top: 10px;
       line-height: 1.75;
-      color: #0f766e;
+      color: var(--green-2);
     }
     .create-account-selector {
       display: grid;
@@ -204,7 +530,8 @@
       padding: 10px;
       border: 1px solid var(--line-strong);
       border-radius: 8px;
-      background: rgba(255, 255, 255, .7);
+      background:
+        linear-gradient(145deg, rgb(var(--surface-rgb) / .86), rgb(var(--surface-rgb) / .58));
     }
     .create-account-selector .selector-actions {
       display: flex;
@@ -217,6 +544,19 @@
       border-radius: 8px;
       font-size: 12px;
     }
+    .selector-label-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .selector-label-row button {
+      padding: 7px 10px;
+      border-radius: 10px;
+      font-size: 12px;
+      font-weight: 900;
+    }
     .create-account-option {
       display: flex;
       flex-direction: row;
@@ -224,9 +564,9 @@
       justify-content: space-between;
       gap: 10px;
       padding: 9px 10px;
-      border: 1px solid rgba(118, 143, 174, .18);
+      border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgba(248, 251, 255, .72);
+      background: rgb(var(--surface-rgb) / .64);
       color: var(--text);
       font-size: 13px;
       font-weight: 800;
@@ -261,29 +601,29 @@
       display: inline-flex;
       align-items: center;
       min-height: 24px;
-      border: 1px solid rgba(100, 116, 139, .22);
+      border: 1px solid var(--line-strong);
       border-radius: 999px;
       padding: 3px 8px;
-      color: #475569;
-      background: #f8fafc;
+      color: var(--muted);
+      background: var(--soft-glass);
       font-size: 12px;
       font-weight: 900;
       white-space: nowrap;
     }
     .login-chip.on {
-      color: #047857;
-      border-color: rgba(16, 185, 129, .26);
-      background: rgba(209, 250, 229, .72);
+      color: var(--ok);
+      border-color: var(--ok-line);
+      background: var(--ok-soft);
     }
     .login-chip.warn {
-      color: #a16207;
-      border-color: rgba(180, 83, 9, .24);
-      background: #fffbeb;
+      color: var(--warn);
+      border-color: var(--warn-line);
+      background: var(--warn-soft);
     }
     .login-chip.off {
-      color: #64748b;
-      border-color: rgba(100, 116, 139, .2);
-      background: #f8fafc;
+      color: var(--faint);
+      border-color: var(--line);
+      background: var(--soft-glass);
     }
     .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 16px 18px; }
     .field-grid .full, .form .full { grid-column: 1 / -1; }
@@ -292,7 +632,7 @@
     input, textarea, select {
       width: 100%;
       min-width: 0;
-      background: rgba(255, 255, 255, .9);
+      background: var(--input-bg);
       color: var(--text);
       border: 1px solid var(--line-strong);
       border-radius: 8px;
@@ -301,15 +641,15 @@
       transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
     }
     input:focus, textarea:focus, select:focus {
-      border-color: rgba(19, 184, 166, .62);
-      box-shadow: 0 0 0 4px rgba(19, 184, 166, .12);
-      background: #fff;
+      border-color: color-mix(in srgb, var(--green) 62%, transparent);
+      box-shadow: 0 0 0 4px var(--focus-ring);
+      background: var(--card);
     }
     textarea { min-height: 88px; resize: vertical; }
     input[type="checkbox"] { width: auto; min-width: 0; }
     label.checkline { flex-direction: row; align-items: center; justify-content: flex-start; padding: 11px 12px; }
     button {
-      background: rgba(255, 255, 255, .9);
+      background: var(--input-bg);
       color: var(--text);
       border: 1px solid var(--line-strong);
       border-radius: 8px;
@@ -318,65 +658,65 @@
       transition: transform .12s ease, border-color .12s ease, background .12s ease;
       white-space: nowrap;
     }
-    button:hover { transform: translateY(-1px); border-color: rgba(19, 184, 166, .46); background: #f3fffb; }
-    button.primary { background: linear-gradient(135deg, #13b8a6, #17c9ae); color: #fff; border-color: transparent; font-weight: 800; box-shadow: 0 12px 26px rgba(19, 184, 166, .18); }
-    button.danger { border-color: rgba(220, 38, 38, .2); color: #b91c1c; background: #fff5f5; }
+    button:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--green) 46%, transparent); background: color-mix(in srgb, var(--green) 8%, var(--card)); }
+    button.primary { background: linear-gradient(135deg, var(--green), var(--green-2)); color: var(--on-accent); border-color: transparent; font-weight: 800; box-shadow: 0 12px 26px color-mix(in srgb, var(--green) 18%, transparent); }
+    button.danger { border-color: var(--bad-line); color: var(--bad); background: var(--bad-soft); }
     button.ghost { background: transparent; }
     button:disabled { cursor: not-allowed; opacity: .55; transform: none; }
     .notice {
       margin: 14px 18px 0;
       padding: 12px 13px;
-      color: #0f766e;
+      color: var(--ok);
       line-height: 1.65;
       white-space: pre-wrap;
-      background: rgba(236, 253, 245, .82);
+      background: var(--ok-soft);
       border: 1px solid var(--line);
       border-radius: 8px;
     }
     .hint { color: var(--faint); font-size: 12px; line-height: 1.6; padding: 0 18px 16px; }
     .table-wrap { overflow: auto; }
     table { width: 100%; border-collapse: collapse; min-width: 940px; }
-    th, td { border-top: 1px solid rgba(118, 143, 174, .16); padding: 13px 14px; text-align: left; vertical-align: middle; }
-    th { color: var(--muted); font-size: 12px; font-weight: 800; background: #f7fbff; position: sticky; top: 0; }
-    tbody tr:hover { background: rgba(19, 184, 166, .045); }
+    th, td { border-top: 1px solid var(--line); padding: 13px 14px; text-align: left; vertical-align: middle; }
+    th { color: var(--muted); font-size: 12px; font-weight: 800; background: var(--th-bg); position: sticky; top: 0; }
+    tbody tr:hover { background: color-mix(in srgb, var(--green) 6%, var(--card)); }
     .mail-title { font-weight: 800; }
-    .email { color: #0f766e; font-weight: 700; }
+    .email { color: var(--green-2); font-weight: 700; }
     .token-mask { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
     .muted { color: var(--faint); }
     .pill {
       display: inline-flex;
       align-items: center;
       gap: 5px;
-      border: 1px solid rgba(19, 184, 166, .22);
+      border: 1px solid var(--ok-line);
       border-radius: 999px;
       padding: 4px 9px;
-      color: #047857;
-      background: rgba(209, 250, 229, .72);
+      color: var(--ok);
+      background: var(--ok-soft);
       font-size: 12px;
       font-weight: 800;
       margin: 2px 4px 2px 0;
     }
-    .pill.off, .status-failed, .status-disabled { color: #b91c1c; border-color: rgba(220, 38, 38, .2); background: #fff5f5; }
-    .status-used { color: #a16207; border-color: rgba(180, 83, 9, .2); background: #fffbeb; }
-    .status-available, .status-active { color: #047857; }
+    .pill.off, .status-failed, .status-disabled { color: var(--bad); border-color: var(--bad-line); background: var(--bad-soft); }
+    .status-used { color: var(--warn); border-color: var(--warn-line); background: var(--warn-soft); }
+    .status-available, .status-active { color: var(--ok); }
     .row-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-    .row-actions button, .row-actions select { width: auto; min-width: 0; padding: 8px 10px; border-radius: 10px; font-size: 12px; }
+    .row-actions button, .row-actions select { width: auto; min-width: 0; padding: 8px 10px; border-radius: 8px; font-size: 12px; }
     .account-group td {
-      background: rgba(19, 184, 166, .08);
-      color: #0f766e;
+      background: color-mix(in srgb, var(--green) 10%, var(--card));
+      color: var(--green-2);
       font-weight: 900;
       letter-spacing: 0;
     }
     .log {
       margin: 0;
-      background: #f8fafc;
-      border-top: 1px solid rgba(118, 143, 174, .16);
+      background: var(--log-bg);
+      border-top: 1px solid var(--line);
       padding: 16px 18px;
       white-space: pre-wrap;
       min-height: 210px;
       max-height: 360px;
       overflow: auto;
-      color: #334155;
+      color: var(--log-ink);
       font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
       font-size: 13px;
       line-height: 1.7;
@@ -407,6 +747,21 @@
       box-shadow: 0 36px 120px rgba(6, 22, 55, .28);
       overflow: hidden;
     }
+    body[data-density="compact"] .content-head { padding: 12px 18px; }
+    body[data-density="compact"] .content-main { padding: 0; }
+    body[data-density="compact"] .global-log-panel { margin: 0 18px 24px; }
+    body[data-density="compact"] .grid,
+    body[data-density="compact"] .layout,
+    body[data-density="compact"] .workflow,
+    body[data-density="compact"] .stack { gap: 12px; }
+    body[data-density="compact"] .card,
+    body[data-density="compact"] .panel-head,
+    body[data-density="compact"] .toolbar,
+    body[data-density="compact"] .form,
+    body[data-density="compact"] .field-grid { padding: 12px 14px; }
+    body[data-density="compact"] th,
+    body[data-density="compact"] td { padding: 10px 12px; }
+    body[data-density="compact"] .log { padding: 12px 14px; line-height: 1.55; }
     @media (max-width: 1120px) {
       .app-shell { grid-template-columns: 1fr; }
       .sidebar {
@@ -416,19 +771,149 @@
         grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr);
         gap: 14px;
       }
-      .brand, .user-box, .side-nav, .side-tools { min-width: 0; }
+      .brand, .side-nav { min-width: 0; }
       .side-nav { grid-template-columns: repeat(3, minmax(0, 1fr)); align-content: start; }
-      .grid { grid-template-columns: repeat(2, 1fr); }
+      .tool-panel-grid { grid-template-columns: 1fr; }
+      .grid, .quick-grid { grid-template-columns: repeat(2, 1fr); }
       .content-head { position: relative; top: auto; }
     }
     @media (max-width: 680px) {
+      .app-shell { padding: 8px; gap: 8px; }
       .sidebar { grid-template-columns: 1fr; padding: 16px; }
       .side-nav { grid-template-columns: 1fr 1fr; }
-      .content-head, .content-main { padding-left: 16px; padding-right: 16px; }
+      .content-head { padding-left: 16px; padding-right: 16px; }
+      .content-main { padding: 0; }
+      .global-log-panel { margin-left: 16px; margin-right: 16px; }
       .content-head { align-items: flex-start; flex-direction: column; }
-      .content-actions, .content-actions button { width: 100%; }
-      .grid, .field-grid { grid-template-columns: 1fr; }
+      .content-actions, .content-actions > button, .account-dock, .appearance-controls { width: 100%; }
+      .account-dock { grid-template-columns: 1fr 1fr; }
+      .account-dock .user-badge { grid-column: 1 / -1; }
+      .grid, .quick-grid, .field-grid { grid-template-columns: 1fr; }
       .card strong { font-size: 28px; }
+    }
+    /* ===== motion & polish layer ===== */
+    :root {
+      --ease-spring: cubic-bezier(.34, 1.56, .64, 1);
+      --ease-out: cubic-bezier(.22, .61, .36, 1);
+      --dur: .26s;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Microsoft YaHei UI", "Segoe UI", Inter, system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      text-rendering: optimizeLegibility;
+      letter-spacing: .004em;
+    }
+    h1 { letter-spacing: -.022em; font-weight: 700; }
+    h2 { letter-spacing: -.014em; font-weight: 700; }
+    .card strong { font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+    .eyebrow { letter-spacing: .08em; }
+
+    .sidebar, .content-head, .brand, .panel, .panel-head, .login-chip, .account-tabs, .session-tabs,
+    th, .log, .pill, .count-dot, input, textarea, select {
+      transition: background-color .45s var(--ease-out), background .45s var(--ease-out), border-color .45s var(--ease-out), color .4s var(--ease-out), box-shadow .4s var(--ease-out);
+    }
+
+    .sidebar, .content-head { backdrop-filter: blur(24px) saturate(165%); -webkit-backdrop-filter: blur(24px) saturate(165%); }
+    .panel { backdrop-filter: blur(20px) saturate(150%); -webkit-backdrop-filter: blur(20px) saturate(150%); }
+
+    button {
+      position: relative;
+      transition: transform var(--dur) var(--ease-spring), box-shadow .3s var(--ease-out), background-color .4s var(--ease-out), background .4s var(--ease-out), border-color .4s var(--ease-out), color .3s var(--ease-out);
+    }
+    button:hover { transform: translateY(-2px); }
+    button:active { transform: translateY(0) scale(.96); transition-duration: .09s; }
+    button.primary:hover { box-shadow: 0 18px 34px color-mix(in srgb, var(--green) 30%, transparent); }
+    button:disabled:hover { transform: none; }
+
+    .nav-item { transition: transform .28s var(--ease-spring), background-color .4s var(--ease-out), background .4s var(--ease-out), color .3s var(--ease-out), box-shadow .35s var(--ease-out); }
+    .nav-item:hover { transform: translateX(3px); }
+    .nav-item:active { transform: translateX(1px) scale(.99); }
+    .nav-item.active { animation: navPop .42s var(--ease-spring); }
+
+    .segmented button, .log-tabs button, .account-tabs button, .session-tabs button, .pager button, .row-actions button {
+      transition: transform .24s var(--ease-spring), background-color .3s var(--ease-out), background .3s var(--ease-out), color .25s, box-shadow .3s var(--ease-out);
+    }
+    .segmented button:active, .log-tabs button:active { transform: scale(.93); }
+    .segmented button.active, .log-tabs button.active, .account-tabs button.active, .session-tabs button.active { animation: popIn .34s var(--ease-spring); }
+
+    .card { transition: transform .32s var(--ease-spring), box-shadow .35s var(--ease-out), background-color .45s var(--ease-out), background .45s var(--ease-out), border-color .45s var(--ease-out); }
+    .card:hover { transform: translateY(-3px); box-shadow: var(--shadow-strong); }
+
+    .card, .quick-card { animation: fadeUp .55s var(--ease-out) both; }
+    .grid .card:nth-child(2) { animation-delay: .05s; }
+    .grid .card:nth-child(3) { animation-delay: .1s; }
+    .grid .card:nth-child(4) { animation-delay: .15s; }
+    .quick-grid .quick-card:nth-child(2) { animation-delay: .07s; }
+    .quick-grid .quick-card:nth-child(3) { animation-delay: .14s; }
+    .quick-grid .quick-card:nth-child(4) { animation-delay: .21s; }
+
+    .quick-card {
+      position: relative;
+      overflow: hidden;
+      transition: transform .32s var(--ease-spring), box-shadow .35s var(--ease-out), background .45s var(--ease-out), border-color .45s var(--ease-out);
+    }
+    .quick-card:hover { transform: translateY(-4px); }
+    .quick-card::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      pointer-events: none;
+      background: linear-gradient(115deg, transparent 32%, rgb(var(--surface-rgb) / .55) 48%, transparent 64%);
+      transform: translateX(-130%);
+      transition: transform .85s var(--ease-out);
+    }
+    .quick-card:hover::after { transform: translateX(130%); }
+
+    .view-section.active { animation: viewIn .44s var(--ease-out); }
+
+    .modal-backdrop { transition: opacity .3s var(--ease-out); }
+    .modal-backdrop.show .modal { animation: modalIn .44s var(--ease-spring); }
+
+    .nav-item::before { content: none; }
+    .nav-ico {
+      width: 28px;
+      height: 28px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 9px;
+      color: var(--green-2);
+      background: linear-gradient(135deg, color-mix(in srgb, var(--green) 24%, var(--card)), rgb(var(--surface-rgb) / .5));
+      border: 1px solid color-mix(in srgb, var(--green) 22%, transparent);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .4);
+      transition: transform .32s var(--ease-spring), background .4s var(--ease-out), color .3s var(--ease-out), border-color .4s var(--ease-out);
+    }
+    .nav-ico svg { width: 16px; height: 16px; }
+    .nav-item:hover .nav-ico { transform: scale(1.1) rotate(-4deg); }
+    .nav-item.active .nav-ico {
+      color: var(--on-accent);
+      background: rgba(255, 255, 255, .22);
+      border-color: rgba(255, 255, 255, .34);
+    }
+    .quick-card i {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--on-accent);
+      transition: transform .35s var(--ease-spring), background .4s var(--ease-out);
+    }
+    .quick-card i svg { width: 18px; height: 18px; }
+    .quick-card:hover i { transform: scale(1.12) rotate(-5deg); }
+
+    @keyframes fadeUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+    @keyframes viewIn { from { opacity: 0; transform: translateY(10px) scale(.995); } to { opacity: 1; transform: none; } }
+    @keyframes popIn { from { opacity: 0; transform: scale(.85); } to { opacity: 1; transform: none; } }
+    @keyframes navPop { 0% { transform: scale(.97); } 55% { transform: scale(1.02); } 100% { transform: none; } }
+    @keyframes modalIn { 0% { opacity: 0; transform: translateY(18px) scale(.96); } 100% { opacity: 1; transform: none; } }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: .001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .001ms !important;
+      }
     }
   </style>
 </head>
@@ -441,42 +926,16 @@
         <div class="sub">隐私邮箱创建、同步和取码 API 工作台。</div>
       </div>
 
-      <div class="user-box">
-        <button class="ghost user-badge" id="currentUserBadge">未登录</button>
-        <div class="user-actions">
-          <button onclick="location.href='/manage'">账号数据</button>
-          <button class="ghost" onclick="logout()">退出</button>
-        </div>
-      </div>
-
       <nav class="side-nav" aria-label="功能分类">
-        <button class="nav-item active" data-view="overview" onclick="setActiveView('overview')"><span>概览</span><span class="count-dot" id="navOverviewCount">0</span></button>
-        <button class="nav-item" data-view="session" onclick="setActiveView('session')"><span>登录态</span><span class="count-dot" id="navSessionCount">0</span></button>
-        <button class="nav-item" data-view="create" onclick="setActiveView('create')"><span>创建邮箱</span></button>
-        <button class="nav-item" data-view="import" onclick="setActiveView('import')"><span>导入同步</span></button>
-        <button class="nav-item" data-view="mailboxes" onclick="setActiveView('mailboxes')"><span>邮箱池</span><span class="count-dot" id="navMailboxCount">0</span></button>
-        <button class="nav-item" data-view="logs" onclick="setActiveView('logs')"><span>运行日志</span></button>
-        <button class="nav-item" data-view="advanced" onclick="setActiveView('advanced')"><span>高级工具</span></button>
+        <button class="nav-item active" data-view="overview" onclick="setActiveView('overview')"><span class="nav-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="1.7"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.7"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.7"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.7"/></svg></span><span>概览</span><span class="count-dot" id="navOverviewCount">0</span></button>
+        <button class="nav-item" data-view="session" onclick="setActiveView('session')"><span class="nav-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="4.6"/><path d="m12.4 12.4 7.6 7.6"/><path d="m16.6 16.6 2-2"/></svg></span><span>登录态</span><span class="count-dot" id="navSessionCount">0</span></button>
+        <button class="nav-item" data-view="create" onclick="setActiveView('create')"><span class="nav-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="17" height="17" rx="5"/><path d="M12 8.4v7.2M8.4 12h7.2"/></svg></span><span>创建邮箱</span></button>
+        <button class="nav-item" data-view="import" onclick="setActiveView('import')"><span class="nav-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19.6 12a7.6 7.6 0 0 1-13 5.4"/><path d="M4.4 12A7.6 7.6 0 0 1 17.4 6.6"/><path d="M17.6 3.4v3.4h-3.4"/><path d="M6.4 20.6v-3.4h3.4"/></svg></span><span>导入同步</span></button>
+        <button class="nav-item" data-view="mailboxes" onclick="setActiveView('mailboxes')"><span class="nav-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 13.4 6.3 6.7A2 2 0 0 1 8.2 5.4h7.6a2 2 0 0 1 1.9 1.3L20 13.4"/><path d="M4 13.4h4.2l1.3 2.2h5l1.3-2.2H20v3.7A1.9 1.9 0 0 1 18.1 19.2H5.9A1.9 1.9 0 0 1 4 17.1z"/></svg></span><span>邮箱池</span><span class="count-dot" id="navMailboxCount">0</span></button>
+        <button class="nav-item" data-view="export" onclick="setActiveView('export')"><span class="nav-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.8v10.4"/><path d="m15.6 10.6-3.6 3.6-3.6-3.6"/><path d="M4.6 16.2v1.4A2.4 2.4 0 0 0 7 20h10a2.4 2.4 0 0 0 2.4-2.4v-1.4"/></svg></span><span>导出清理</span></button>
+        <button class="nav-item" data-view="logs" onclick="setActiveView('logs')"><span class="nav-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 7h15M4.5 12h15M4.5 17h9.5"/></svg></span><span>运行日志</span></button>
+        <button class="nav-item" data-view="advanced" onclick="setActiveView('advanced')"><span class="nav-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4v5.5M6 14.5V20M12 4v3M12 11v9M18 4v8.5M18 17.5V20"/><circle cx="6" cy="12" r="2"/><circle cx="12" cy="9" r="2"/><circle cx="18" cy="15" r="2"/></svg></span><span>高级工具</span></button>
       </nav>
-
-      <div class="side-tools">
-        <div class="side-tools-title">导出和清理</div>
-        <div class="tool-grid">
-          <select id="mailboxExportFormat" class="export-format" title="导出格式">
-            <option value="txt">TXT</option>
-            <option value="csv">CSV</option>
-            <option value="tsv">TSV</option>
-            <option value="jsonl">JSONL</option>
-          </select>
-          <button onclick="exportMailboxEmails()">只导出邮箱</button>
-        </div>
-        <select id="mailboxExportAccount" class="export-account" title="导出账号范围">
-          <option value="__current">当前TAB账号</option>
-          <option value="">全部登录态</option>
-        </select>
-        <button onclick="exportMailboxAPIs()">导出邮箱API</button>
-        <button class="danger" onclick="cleanAllRemoteCodes()">一键删除码</button>
-      </div>
     </aside>
 
     <section class="content">
@@ -487,8 +946,38 @@
           <div class="sub" id="activeViewSubtitle">查看账号、邮箱和验证码数量。</div>
         </div>
         <div class="content-actions">
+          <div class="appearance-controls" aria-label="界面设置">
+            <label class="theme-select" aria-label="界面风格">
+              <span>主题</span>
+              <select id="themeSelect" onchange="setTheme(this.value)">
+                <optgroup label="浅色">
+                  <option value="mint">清透薄荷</option>
+                  <option value="sky">蓝调</option>
+                  <option value="graphite">灰阶</option>
+                  <option value="sunset">暮光暖橘</option>
+                  <option value="violet">紫晶</option>
+                  <option value="rose">绯樱</option>
+                  <option value="forest">森野</option>
+                </optgroup>
+                <optgroup label="深色">
+                  <option value="midnight">暗夜</option>
+                  <option value="obsidian">曜石</option>
+                  <option value="aurora">极光</option>
+                </optgroup>
+              </select>
+            </label>
+            <div class="segmented" role="group" aria-label="显示密度">
+              <button type="button" data-density-option="comfortable" onclick="setDensity('comfortable')">舒展</button>
+              <button type="button" data-density-option="compact" onclick="setDensity('compact')">紧凑</button>
+            </div>
+          </div>
           <button onclick="openRunConfig()">运行配置</button>
           <button class="primary" onclick="refresh()">刷新状态</button>
+          <div class="account-dock">
+            <div class="user-badge" id="currentUserBadge">未登录</div>
+            <button onclick="location.href='/manage'">账号数据</button>
+            <button class="ghost" onclick="logout()">退出</button>
+          </div>
         </div>
       </header>
 
@@ -499,6 +988,28 @@
             <div class="card"><strong id="mailboxCount">0</strong><span>隐私邮箱</span></div>
             <div class="card"><strong id="messageCount">0</strong><span>验证码邮件</span></div>
             <div class="card"><strong id="apiStatus">-</strong><span>API 状态</span></div>
+          </section>
+          <section class="quick-grid" aria-label="快捷组件">
+            <button class="quick-card" onclick="setActiveView('session')">
+              <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.3 5.2 5.8v5.8c0 3.9 2.9 6.4 6.8 7.8 3.9-1.4 6.8-3.9 6.8-7.8V5.8z"/><path d="m8.9 11.8 2.1 2.2 4.2-4.4"/></svg></i>
+              <strong>登录态中心</strong>
+              <span>保存新接口和旧接口登录态，检测是否正常。</span>
+            </button>
+            <button class="quick-card" onclick="setActiveView('create')">
+              <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5.5" width="18" height="13" rx="2.6"/><path d="m4.3 7.7 7.7 5.3 7.7-5.3"/></svg></i>
+              <strong>创建邮箱</strong>
+              <span>选择多个 Apple 账号，同时跑新旧接口创建。</span>
+            </button>
+            <button class="quick-card" onclick="setActiveView('mailboxes')">
+              <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 13.4 6.3 6.7A2 2 0 0 1 8.2 5.4h7.6a2 2 0 0 1 1.9 1.3L20 13.4"/><path d="M4 13.4h4.2l1.3 2.2h5l1.3-2.2H20v3.7A1.9 1.9 0 0 1 18.1 19.2H5.9A1.9 1.9 0 0 1 4 17.1z"/></svg></i>
+              <strong>邮箱池</strong>
+              <span>搜索邮箱、复制 API、取码和同步邮件。</span>
+            </button>
+            <button class="quick-card" onclick="setActiveView('export')">
+              <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.8v10.4"/><path d="m15.6 10.6-3.6 3.6-3.6-3.6"/><path d="M4.6 16.2v1.4A2.4 2.4 0 0 0 7 20h10a2.4 2.4 0 0 0 2.4-2.4v-1.4"/></svg></i>
+              <strong>导出清理</strong>
+              <span>按格式导出邮箱/API，清理远端验证码邮件。</span>
+            </button>
           </section>
         </section>
 
@@ -536,7 +1047,14 @@
           <div class="field-grid">
             <label>标签<input id="protoLabel" placeholder="UPI-70-13"></label>
             <label>备注<input id="protoNote" placeholder="选填"></label>
-            <div class="full field-label">参与创建账号
+            <div class="full field-label">
+              <div class="selector-label-row">
+                <span>参与创建账号</span>
+                <span>
+                  <button id="createCheckSessionButton" type="button" onclick="checkICloudSession()">检测登录态</button>
+                  <span id="createSessionCheckStatus" class="muted">检测后会刷新新旧接口状态。</span>
+                </span>
+              </div>
               <div id="protoAccountSelector" class="create-account-selector muted">保存登录态后可在这里勾选参与创建的 Apple 账号。</div>
             </div>
           </div>
@@ -544,7 +1062,6 @@
             <button id="createICloudButton" class="primary" onclick="createICloudMailbox()">开始创建</button>
             <span id="protoBatchProgress" class="muted">每次点击会让当前勾选账号同时创建 1 轮，并记录本次成功/失败数量。</span>
           </div>
-          <div id="protoCreateDetails" class="log mini-log">暂无创建记录。</div>
           <div class="field-grid">
             <label class="full">定时间隔分钟<input id="scheduleIntervalMinutes" type="number" min="1" max="1440" value="60" placeholder="默认 60"></label>
           </div>
@@ -553,11 +1070,6 @@
             <button id="stopScheduleButton" class="danger" onclick="stopMailboxScheduler()">停止定时创建</button>
             <span id="scheduleStatus" class="muted">定时创建未启动；刷新页面不会停止后台任务。</span>
           </div>
-          <div class="toolbar">
-            <button onclick="copyScheduleEvents()">复制定时日志</button>
-            <button class="danger" onclick="clearScheduleEvents()">清除定时日志</button>
-          </div>
-          <div id="scheduleEvents" class="log mini-log">暂无定时创建记录。</div>
         </section>
 
         <section class="view-section panel" data-view="import">
@@ -601,17 +1113,37 @@
           </div>
         </section>
 
-        <section class="view-section panel" data-view="logs">
+        <section class="view-section panel" data-view="export">
           <div class="panel-head">
-            <h2>运行日志</h2>
-            <p>最近操作倒序显示。</p>
+            <h2>导出清理</h2>
+            <p>邮箱导出、API 导出和远端验证码邮件清理。</p>
           </div>
-          <div class="toolbar">
-            <button onclick="refresh()">刷新状态</button>
-            <button onclick="copyLog()">复制日志</button>
-            <button class="danger" onclick="clearLog()">清除日志</button>
+          <div class="tool-panel-grid">
+            <div class="tool-panel-group">
+              <div class="tool-panel-label">格式和范围</div>
+              <select id="mailboxExportFormat" class="export-format" title="导出格式">
+                <option value="txt">TXT</option>
+                <option value="csv">CSV</option>
+                <option value="tsv">TSV</option>
+                <option value="jsonl">JSONL</option>
+              </select>
+              <select id="mailboxExportAccount" class="export-account" title="导出账号范围">
+                <option value="__current">当前TAB账号</option>
+                <option value="">全部登录态</option>
+              </select>
+            </div>
+            <div class="tool-panel-group">
+              <div class="tool-panel-label">导出动作</div>
+              <div class="tool-grid">
+                <button onclick="exportMailboxEmails()">只导出邮箱</button>
+                <button onclick="exportMailboxAPIs()">导出邮箱API</button>
+              </div>
+            </div>
+            <div class="tool-panel-group">
+              <div class="tool-panel-label">清理动作</div>
+              <button class="danger" onclick="cleanAllRemoteCodes()">一键删除码</button>
+            </div>
           </div>
-          <div id="log" class="log">等待操作...</div>
         </section>
 
         <section class="view-section panel" data-view="advanced">
@@ -640,6 +1172,26 @@
           </div>
         </section>
       </main>
+      <section id="globalLogPanel" class="panel global-log-panel">
+        <div class="panel-head log-panel-head">
+          <div>
+            <h2>日志</h2>
+            <p>运行日志、创建账号日志和定时创建日志统一显示。</p>
+          </div>
+          <div class="log-tabs" aria-label="日志分类">
+            <button type="button" data-log-category="all" onclick="setLogCategory('all')">全部</button>
+            <button type="button" data-log-category="runtime" onclick="setLogCategory('runtime')">运行</button>
+            <button type="button" data-log-category="create" onclick="setLogCategory('create')">创建</button>
+            <button type="button" data-log-category="schedule" onclick="setLogCategory('schedule')">定时</button>
+          </div>
+        </div>
+        <div class="toolbar">
+          <button onclick="refresh()">刷新状态</button>
+          <button onclick="copyLog()">复制日志</button>
+          <button class="danger" onclick="clearLog()">清除日志</button>
+        </div>
+        <div id="log" class="log global-log">等待操作...</div>
+      </section>
     </section>
   </div>
   <div id="runConfigModal" class="modal-backdrop" onclick="closeRunConfig(event)">
@@ -688,12 +1240,20 @@
     let selectedCreateAccountIDs = new Set();
     let currentUser = null;
     const viewStorageKey = 'ipm_active_view';
+    const themeStorageKey = 'ipm_theme';
+    const densityStorageKey = 'ipm_density';
+    let activeLogCategory = 'all';
+    let activeView = 'overview';
+    let runtimeLogText = '等待操作...';
+    let createLogText = '暂无创建记录。';
+    let scheduleLogText = '暂无定时创建记录。';
     const viewMeta = {
       overview: ['概览', '查看账号、邮箱和验证码数量。'],
       session: ['登录态', '保存和检测 Apple 登录态。'],
       create: ['创建邮箱', '按已保存账号创建 Hide My Email 地址。'],
       import: ['导入同步', '导入已有邮箱或同步 iCloud 已有地址。'],
       mailboxes: ['邮箱池', '搜索、复制 API、取码和维护邮箱状态。'],
+      export: ['导出清理', '导出邮箱/API，或清理远端验证码邮件。'],
       logs: ['运行日志', '查看最近操作和后台任务输出。'],
       advanced: ['高级工具', '服务状态、账号标签和测试邮件导入。']
     };
@@ -712,7 +1272,9 @@
       try {
         localStorage.setItem(viewStorageKey, normalized);
       } catch (_) {}
+      activeView = normalized;
       if (normalized === 'mailboxes') renderMailboxes();
+      renderGlobalLogs();
     }
 
     function initViewNavigation() {
@@ -721,6 +1283,41 @@
         saved = localStorage.getItem(viewStorageKey) || 'overview';
       } catch (_) {}
       setActiveView(saved);
+    }
+
+    const THEME_SLUGS = ['mint', 'sky', 'graphite', 'sunset', 'violet', 'rose', 'forest', 'midnight', 'obsidian', 'aurora'];
+    function setTheme(theme) {
+      const normalized = THEME_SLUGS.includes(theme) ? theme : 'mint';
+      document.body.dataset.theme = normalized;
+      const themeSelect = document.getElementById('themeSelect');
+      if (themeSelect && themeSelect.value !== normalized) {
+        themeSelect.value = normalized;
+      }
+      try {
+        localStorage.setItem(themeStorageKey, normalized);
+      } catch (_) {}
+    }
+
+    function setDensity(density) {
+      const normalized = density === 'compact' ? 'compact' : 'comfortable';
+      document.body.dataset.density = normalized;
+      for (const button of document.querySelectorAll('[data-density-option]')) {
+        button.classList.toggle('active', button.dataset.densityOption === normalized);
+      }
+      try {
+        localStorage.setItem(densityStorageKey, normalized);
+      } catch (_) {}
+    }
+
+    function initAppearanceControls() {
+      let savedTheme = 'mint';
+      let savedDensity = 'comfortable';
+      try {
+        savedTheme = localStorage.getItem(themeStorageKey) || 'mint';
+        savedDensity = localStorage.getItem(densityStorageKey) || 'comfortable';
+      } catch (_) {}
+      setTheme(savedTheme);
+      setDensity(savedDensity);
     }
 
     function updateNavCounts(status = {}) {
@@ -778,11 +1375,55 @@
       location.href = '/login';
     }
 
-    function log(text) {
+    function setLogCategory(category) {
+      activeLogCategory = ['all', 'runtime', 'create', 'schedule'].includes(category) ? category : 'all';
+      renderGlobalLogs();
+    }
+
+    function compactLogText(text, emptyText) {
+      const normalized = String(text || '').trim();
+      return normalized ? normalized : emptyText;
+    }
+
+    function logSectionTitle(title, text, emptyText) {
+      return `【${title}】\n${compactLogText(text, emptyText)}`;
+    }
+
+    function currentLogText() {
+      if (activeLogCategory === 'runtime') return compactLogText(runtimeLogText, '等待操作...');
+      if (activeLogCategory === 'create') return compactLogText(createLogText, '暂无创建记录。');
+      if (activeLogCategory === 'schedule') return compactLogText(scheduleLogText, '暂无定时创建记录。');
+      return [
+        logSectionTitle('运行日志', runtimeLogText, '等待操作...'),
+        logSectionTitle('创建账号日志', createLogText, '暂无创建记录。'),
+        logSectionTitle('定时创建日志', scheduleLogText, '暂无定时创建记录。')
+      ].join('\n\n');
+    }
+
+    function renderGlobalLogs() {
+      const panel = $('globalLogPanel');
+      if (panel) panel.hidden = activeView === 'mailboxes';
+      for (const button of document.querySelectorAll('[data-log-category]')) {
+        button.classList.toggle('active', button.dataset.logCategory === activeLogCategory);
+      }
       const el = $('log');
-      if (!el) return;
-      const current = el.textContent === '等待操作...' ? '' : el.textContent;
-      el.textContent = new Date().toLocaleTimeString() + ' ' + text + '\n' + current;
+      if (el) el.textContent = currentLogText();
+    }
+
+    function log(text) {
+      const current = runtimeLogText === '等待操作...' ? '' : runtimeLogText;
+      runtimeLogText = new Date().toLocaleTimeString() + ' ' + text + '\n' + current;
+      renderGlobalLogs();
+    }
+
+    function setCreateLog(text) {
+      createLogText = compactLogText(text, '暂无创建记录。');
+      renderGlobalLogs();
+    }
+
+    function setScheduleLog(text) {
+      scheduleLogText = compactLogText(text, '暂无定时创建记录。');
+      renderGlobalLogs();
     }
 
     function boundedInt(id, fallback, min, max) {
@@ -1145,20 +1786,23 @@
     async function checkICloudSession() {
       if (sessionCheckInFlight) return;
       sessionCheckInFlight = true;
-      const button = $('sessionCheckButton');
-      if (button) button.disabled = true;
+      const buttons = ['sessionCheckButton', 'createCheckSessionButton'].map(id => $(id)).filter(Boolean);
+      buttons.forEach(button => { button.disabled = true; });
       if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = '正在检测新接口和旧接口登录态...';
+      if ($('createSessionCheckStatus')) $('createSessionCheckStatus').textContent = '正在检测...';
       try {
         const data = await api('/api/icloud/session/check', {method:'POST', body:'{}'});
         renderICloudSessions(data.sessions || (data.session && data.session.saved ? [data.session] : []));
         if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = data.message || '登录态检测完成';
+        if ($('createSessionCheckStatus')) $('createSessionCheckStatus').textContent = data.message || '检测完成，账号状态已刷新。';
         log(data.message || '登录态检测正常：新旧接口状态已刷新');
       } catch (err) {
         if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = '登录态检测失败；请按失败提示重新保存对应登录态。';
+        if ($('createSessionCheckStatus')) $('createSessionCheckStatus').textContent = '检测失败，请查看运行日志。';
         log('登录态检测失败：' + err.message + '；请按失败提示重新保存对应登录态');
         await refresh().catch(() => {});
       } finally {
-        if (button) button.disabled = false;
+        buttons.forEach(button => { button.disabled = false; });
         sessionCheckInFlight = false;
       }
     }
@@ -1228,9 +1872,7 @@
     }
 
     async function copyScheduleEvents() {
-      const el = $('scheduleEvents');
-      if (!el) return;
-      const text = el.textContent === '暂无定时创建记录。' ? '' : el.textContent;
+      const text = scheduleLogText === '暂无定时创建记录。' ? '' : scheduleLogText;
       try {
         await writeClipboard(text);
         log('已复制定时创建日志');
@@ -1269,17 +1911,11 @@
           : `未运行：默认每 60 分钟开始一次；历史创建 ${scheduler.success || 0}，失败 ${scheduler.failed || 0}`;
         $('scheduleStatus').textContent = scheduler.last_error ? `${statusText}；最近错误：${scheduler.last_error}` : statusText;
       }
-      if ($('scheduleEvents')) {
-        if (events.length === 0) {
-          $('scheduleEvents').textContent = '暂无定时创建记录。';
-        } else {
-          $('scheduleEvents').textContent = events.slice(0, 30).map(event => {
-            const email = event.email ? ` ${event.email}` : '';
-            const err = event.error ? `；${event.error}` : '';
-            return `${event.at || '-'} [${event.type || '-'}] ${event.message || ''}${email}${err}`;
-          }).join('\n');
-        }
-      }
+      setScheduleLog(events.length === 0 ? '暂无定时创建记录。' : events.slice(0, 30).map(event => {
+        const email = event.email ? ` ${event.email}` : '';
+        const err = event.error ? `；${event.error}` : '';
+        return `${event.at || '-'} [${event.type || '-'}] ${event.message || ''}${email}${err}`;
+      }).join('\n'));
       if (hasNewCreated && !options.silent) {
         log('定时创建有新邮箱成功，列表已准备刷新');
       }
@@ -1655,7 +2291,6 @@
     async function createICloudMailbox() {
       const button = $('createICloudButton');
       const progress = $('protoBatchProgress');
-      const details = $('protoCreateDetails');
       let accountIDs;
       let accountNames;
       try {
@@ -1663,7 +2298,7 @@
         accountNames = selectedCreateAccountNames();
       } catch (err) {
         progress.textContent = err.message;
-        if (details) details.textContent = `创建未启动：${err.message}`;
+        setCreateLog(`创建未启动：${err.message}`);
         log('创建邮箱未启动：' + err.message);
         return;
       }
@@ -1672,7 +2307,7 @@
 
       button.disabled = true;
       progress.textContent = `创建中：参与账号=${accountNames}`;
-      if (details) details.textContent = `创建中：参与账号=${accountNames}`;
+      setCreateLog(`创建中：参与账号=${accountNames}`);
       log(`开始创建隐私邮箱：参与账号=${accountNames}`);
       try {
         const data = await api('/api/icloud/mailboxes/create', {method:'POST', body: JSON.stringify({
@@ -1693,7 +2328,7 @@
         log(`本次创建完成：成功 ${mailboxes.length}，失败 ${failures.length}`);
       } catch (err) {
         progress.textContent = `本次创建失败：${err.message}`;
-        if (details) details.textContent = `本次创建失败：${err.message}`;
+        setCreateLog(`本次创建失败：${err.message}`);
         log('本次创建失败：' + err.message);
       } finally {
         button.disabled = false;
@@ -1702,8 +2337,6 @@
     }
 
     function renderCreateDetails(mailboxes, failures) {
-      const details = $('protoCreateDetails');
-      if (!details) return;
       const lines = [`本次创建明细：成功 ${mailboxes.length}，失败 ${failures.length}`];
       if (mailboxes.length > 0) {
         lines.push('', '成功：');
@@ -1719,7 +2352,7 @@
           lines.push(`${index + 1}. ${account} / ${failure.error || '未知错误'}`);
         });
       }
-      details.textContent = lines.join('\n');
+      setCreateLog(lines.join('\n'));
     }
 
     async function verifyMailbox(id) {
@@ -1846,9 +2479,10 @@
     }
 
     async function copyLog() {
-      const el = $('log');
-      if (!el) return;
-      const text = el.textContent === '等待操作...' ? '' : el.textContent;
+      const raw = currentLogText();
+      const emptyAll = '【运行日志】\n等待操作...\n\n【创建账号日志】\n暂无创建记录。\n\n【定时创建日志】\n暂无定时创建记录。';
+      const emptyValues = new Set([emptyAll, '等待操作...', '暂无创建记录。', '暂无定时创建记录。']);
+      const text = emptyValues.has(raw) ? '' : raw;
       try {
         await writeClipboard(text);
         log('已复制日志');
@@ -1857,15 +2491,30 @@
       }
     }
 
-    function clearLog() {
-      const el = $('log');
-      if (el) el.textContent = '等待操作...';
+    async function clearLog() {
+      if (activeLogCategory === 'runtime') {
+        runtimeLogText = '等待操作...';
+        renderGlobalLogs();
+        return;
+      }
+      if (activeLogCategory === 'create') {
+        setCreateLog('暂无创建记录。');
+        return;
+      }
+      if (activeLogCategory === 'schedule') {
+        await clearScheduleEvents();
+        return;
+      }
+      runtimeLogText = '等待操作...';
+      setCreateLog('暂无创建记录。');
+      await clearScheduleEvents();
     }
 
     function esc(value) {
       return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
 
+    initAppearanceControls();
     initViewNavigation();
     initSessionCheckSettings();
     ensureAuth()

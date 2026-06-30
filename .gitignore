@@ -29,6 +29,7 @@ coverage.out
 *.test
 
 # IDE / OS
+.claude/
 .idea/
 .vscode/
 .vs/
