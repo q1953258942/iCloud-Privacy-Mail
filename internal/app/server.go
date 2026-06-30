@@ -765,22 +765,17 @@ func (s *Server) handleCheckICloudSession(w http.ResponseWriter, r *http.Request
 	failed := 0
 	var lastErr error
 	for _, session := range sessions {
-		err := client.CheckMailSession(r.Context(), session)
-		session.LastCheckedAt = checkedAt
-		session.LastCheckOK = err == nil
-		if err != nil {
+		checkedSession, ok, err := checkSavedLoginStates(r.Context(), client, session, checkedAt)
+		if !ok {
 			failed++
 			lastErr = err
-			session.LastStatusMessage = "最近检测失败：" + formatTime(checkedAt) + "；iCloud Mail 不可用，请重新保存旧接口登录态"
-		} else {
-			session.LastStatusMessage = "最近检测正常：" + formatTime(checkedAt) + "；iCloud Mail 可同步"
 		}
-		if saveErr := s.store.SaveICloudSessionForOwner(ownerID, session); saveErr != nil {
+		if saveErr := s.store.SaveICloudSessionForOwner(ownerID, checkedSession); saveErr != nil {
 			writeError(w, http.StatusInternalServerError, saveErr)
 			return
 		}
-		if err != nil {
-			s.logger.Warn("iCloud session check failed", "account_id", session.AccountID, "err", err)
+		if !ok {
+			s.logger.Warn("login state check failed", "account_id", session.AccountID, "err", err)
 		}
 	}
 	publicSessions := s.publicSessionsForOwner(ownerID)
@@ -789,11 +784,11 @@ func (s *Server) handleCheckICloudSession(w http.ResponseWriter, r *http.Request
 		first = publicSessions[0]
 	}
 	if failed == len(sessions) {
-		message := "全部 iCloud 登录态检测失败"
+		message := "全部登录态检测失败"
 		if lastErr != nil {
 			message += "：" + lastErr.Error()
 		}
-		s.logger.Warn("iCloud session check failed", "err", lastErr)
+		s.logger.Warn("login state check failed", "err", lastErr)
 		writeError(w, http.StatusBadGateway, errCode("icloud_session_check_failed", message, true))
 		return
 	}
@@ -810,6 +805,79 @@ func (s *Server) handleCheckICloudSession(w http.ResponseWriter, r *http.Request
 		"checked_count": len(sessions),
 		"failed_count":  failed,
 	})
+}
+
+func checkSavedLoginStates(ctx context.Context, client *ICloudClient, session ICloudSession, checkedAt time.Time) (ICloudSession, bool, error) {
+	var parts []string
+	checks := 0
+	successes := 0
+	var lastErr error
+
+	if appleAccountLoginSaved(session) {
+		checks++
+		updated, err := client.CheckAppleAccountManageSession(ctx, session)
+		state, _ := appleAccountLoginState(session)
+		if err != nil {
+			lastErr = err
+			state.LastCheckedAt = checkedAt
+			state.LastCheckOK = false
+			state.LastStatusMessage = "新接口登录态异常：" + err.Error()
+			session = withAppleAccountLoginState(session, state)
+			parts = append(parts, "新接口异常")
+		} else {
+			session = updated
+			state, _ = appleAccountLoginState(session)
+			state.LastCheckedAt = checkedAt
+			state.LastCheckOK = true
+			state.LastStatusMessage = "新接口登录态正常"
+			session = withAppleAccountLoginState(session, state)
+			successes++
+			parts = append(parts, "新接口正常")
+		}
+	}
+
+	if iCloudWebLoginSaved(session) {
+		checks++
+		state, _ := iCloudWebLoginState(session)
+		if err := client.CheckMailSession(ctx, session); err != nil {
+			lastErr = err
+			state.LastCheckedAt = checkedAt
+			state.LastCheckOK = false
+			state.LastStatusMessage = "旧接口登录态异常：" + err.Error()
+			session = withICloudWebLoginState(session, state)
+			parts = append(parts, "旧接口异常")
+		} else {
+			state.LastCheckedAt = checkedAt
+			state.LastCheckOK = true
+			state.LastStatusMessage = "旧接口登录态正常"
+			session = withICloudWebLoginState(session, state)
+			successes++
+			parts = append(parts, "旧接口正常")
+		}
+	}
+
+	if checks == 0 {
+		lastErr = errCode("icloud_session_missing", "未保存新接口或旧接口登录态，请先保存登录态", true)
+		parts = append(parts, lastErr.Error())
+	}
+
+	session.LastCheckedAt = checkedAt
+	session.LastCheckOK = successes > 0
+	switch {
+	case successes == checks && checks > 0:
+		session.LastStatusMessage = "登录态正常：" + strings.Join(parts, "；")
+	case successes > 0:
+		session.LastStatusMessage = "登录态部分正常：" + strings.Join(parts, "；")
+	default:
+		session.LastStatusMessage = "登录态异常：" + strings.Join(parts, "；")
+	}
+	if session.LastCheckOK {
+		return session, true, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New(session.LastStatusMessage)
+	}
+	return session, false, lastErr
 }
 
 func (s *Server) handleStartICloudProtocolLogin(w http.ResponseWriter, r *http.Request) {
@@ -2841,30 +2909,51 @@ func publicSession(session *ICloudSession) publicICloudSession {
 	}
 	icloudWebLoginSaved := iCloudWebLoginSaved(*session)
 	appleAccountLoginSaved := appleAccountLoginSaved(*session)
+	icloudWebState, _ := iCloudWebLoginState(*session)
+	appleAccountState, _ := appleAccountLoginState(*session)
 	return publicICloudSession{
-		Saved:                   true,
-		AccountID:               session.AccountID,
-		SavedAt:                 formatTime(session.SavedAt),
-		AppleID:                 maskAppleID(session.AppleID),
-		DSIDMask:                maskSecret(session.DSID, 4),
-		ClientBuildNumber:       session.ClientBuildNumber,
-		MasteringNumber:         session.MasteringNumber,
-		PremiumMailBaseURL:      session.PremiumMailBaseURL,
-		MailGatewayBaseURL:      session.MailGatewayBaseURL,
-		MailBaseURL:             session.MailBaseURL,
-		Host:                    session.Host,
-		IsICloudPlus:            session.IsICloudPlus,
-		CanCreateHME:            session.CanCreateHME,
-		CookieCount:             len(session.Cookies),
-		ICloudWebLoginSaved:     icloudWebLoginSaved,
-		AppleAccountLoginSaved:  appleAccountLoginSaved,
-		AppleAccountManageReady: appleAccountManageReady(*session),
-		ProviderConfigured:      session.IsICloudPlus && session.CanCreateHME && icloudWebLoginSaved,
-		NeedsManualLogin:        !icloudWebLoginSaved && !appleAccountLoginSaved,
-		LastCheckedAt:           formatTime(session.LastCheckedAt),
-		LastCheckOK:             session.LastCheckOK,
-		LastStatusMessage:       message,
+		Saved:                    true,
+		AccountID:                session.AccountID,
+		SavedAt:                  formatTime(session.SavedAt),
+		AppleID:                  maskAppleID(session.AppleID),
+		DSIDMask:                 maskSecret(session.DSID, 4),
+		ClientBuildNumber:        session.ClientBuildNumber,
+		MasteringNumber:          session.MasteringNumber,
+		PremiumMailBaseURL:       session.PremiumMailBaseURL,
+		MailGatewayBaseURL:       session.MailGatewayBaseURL,
+		MailBaseURL:              session.MailBaseURL,
+		Host:                     session.Host,
+		IsICloudPlus:             session.IsICloudPlus,
+		CanCreateHME:             session.CanCreateHME,
+		CookieCount:              len(session.Cookies),
+		ICloudWebLoginSaved:      icloudWebLoginSaved,
+		ICloudWebLoginChecked:    !icloudWebState.LastCheckedAt.IsZero(),
+		ICloudWebLoginOK:         icloudWebState.LastCheckOK,
+		ICloudWebLoginStatus:     loginStatePublicStatus(icloudWebLoginSaved, icloudWebState),
+		AppleAccountLoginSaved:   appleAccountLoginSaved,
+		AppleAccountLoginChecked: !appleAccountState.LastCheckedAt.IsZero(),
+		AppleAccountLoginOK:      appleAccountState.LastCheckOK,
+		AppleAccountLoginStatus:  loginStatePublicStatus(appleAccountLoginSaved, appleAccountState),
+		AppleAccountManageReady:  appleAccountManageReady(*session),
+		ProviderConfigured:       session.IsICloudPlus && session.CanCreateHME && icloudWebLoginSaved,
+		NeedsManualLogin:         !icloudWebLoginSaved && !appleAccountLoginSaved,
+		LastCheckedAt:            formatTime(session.LastCheckedAt),
+		LastCheckOK:              session.LastCheckOK,
+		LastStatusMessage:        message,
 	}
+}
+
+func loginStatePublicStatus(saved bool, state LoginState) string {
+	if !saved {
+		return "未登录"
+	}
+	if state.LastCheckedAt.IsZero() {
+		return "已登录"
+	}
+	if state.LastCheckOK {
+		return "登录态正常"
+	}
+	return "登录态异常"
 }
 
 func iCloudWebLoginSaved(session ICloudSession) bool {
@@ -2877,6 +2966,41 @@ func iCloudWebLoginSaved(session ICloudSession) bool {
 		}
 	}
 	return false
+}
+
+func iCloudWebLoginState(session ICloudSession) (LoginState, bool) {
+	for _, state := range session.LoginStates {
+		if state.Kind == LoginStateICloudWeb && len(state.Cookies) > 0 {
+			return state, true
+		}
+	}
+	if len(session.Cookies) == 0 {
+		return LoginState{}, false
+	}
+	return LoginState{
+		Kind:      LoginStateICloudWeb,
+		Host:      session.Host,
+		Origin:    iCloudOrigin(session),
+		SavedAt:   session.SavedAt,
+		Cookies:   append([]SessionCookie(nil), session.Cookies...),
+		UserAgent: appleAuthUserAgent,
+		Note:      "iCloud webservices login state",
+	}, true
+}
+
+func withICloudWebLoginState(session ICloudSession, next LoginState) ICloudSession {
+	next.Kind = LoginStateICloudWeb
+	if len(next.Cookies) == 0 && len(session.Cookies) > 0 {
+		next.Cookies = append([]SessionCookie(nil), session.Cookies...)
+	}
+	for i, state := range session.LoginStates {
+		if state.Kind == LoginStateICloudWeb {
+			session.LoginStates[i] = next
+			return session
+		}
+	}
+	session.LoginStates = append(session.LoginStates, next)
+	return session
 }
 
 func appleAccountLoginSaved(session ICloudSession) bool {

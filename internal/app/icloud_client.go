@@ -127,6 +127,18 @@ func appleAccountManageReady(session ICloudSession) bool {
 	return ok && strings.TrimSpace(state.APIKey) != ""
 }
 
+func (c *ICloudClient) CheckAppleAccountManageSession(ctx context.Context, session ICloudSession) (ICloudSession, error) {
+	loginState, ok := appleAccountLoginState(session)
+	if !ok {
+		return session, errCode("apple_account_session_missing", "未保存新接口登录态，请先完成新接口登录", true)
+	}
+	refreshed, err := c.RefreshAppleAccountManageState(ctx, loginState)
+	if err != nil {
+		return session, err
+	}
+	return withAppleAccountLoginState(session, refreshed), nil
+}
+
 func withAppleAccountLoginState(session ICloudSession, next LoginState) ICloudSession {
 	next.Kind = LoginStateAppleAccount
 	for i, state := range session.LoginStates {

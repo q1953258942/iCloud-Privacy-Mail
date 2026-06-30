@@ -806,24 +806,44 @@
       return `<span class="login-chip ${mode}">${esc(label)}：${esc(value)}</span>`;
     }
 
+    function loginStateChipMode(saved, checked, ok) {
+      if (!saved) return 'off';
+      if (!checked) return 'warn';
+      return ok ? 'on' : 'warn';
+    }
+
     function sessionLoginBadges(session) {
       const newLogged = appleAccountLoginSaved(session);
       const oldLogged = iCloudWebLoginSaved(session);
-      const newText = newLogged
-        ? (session.apple_account_manage_ready ? '已登录，可创建' : '已登录，待检测')
-        : '未登录';
-      const oldText = oldLogged
-        ? (session.can_create_hme ? '已登录，可创建' : '已登录，不可创建')
-        : '未登录';
+      const newText = session.apple_account_login_status || (newLogged ? '已登录' : '未登录');
+      const oldText = session.icloud_web_login_status || (oldLogged ? '已登录' : '未登录');
       return [
-        loginChip('新接口', newText, newLogged ? (session.apple_account_manage_ready ? 'on' : 'warn') : 'off'),
-        loginChip('旧接口', oldText, oldLogged ? (session.can_create_hme ? 'on' : 'warn') : 'off')
+        loginChip('新接口', newText, loginStateChipMode(newLogged, session.apple_account_login_checked, session.apple_account_login_ok)),
+        loginChip('旧接口', oldText, loginStateChipMode(oldLogged, session.icloud_web_login_checked, session.icloud_web_login_ok))
       ].join('');
     }
 
     function sessionCheckText(session) {
-      if (!session || !session.last_checked_at) return '检测：未检测';
-      return `检测：${session.last_check_ok ? '正常' : '失败'}`;
+      return overallLoginStateText(session);
+    }
+
+    function overallLoginStateText(session) {
+      if (!session) return '登录态：未保存';
+      const states = [];
+      if (appleAccountLoginSaved(session)) {
+        states.push({checked: !!session.apple_account_login_checked, ok: !!session.apple_account_login_ok});
+      }
+      if (iCloudWebLoginSaved(session)) {
+        states.push({checked: !!session.icloud_web_login_checked, ok: !!session.icloud_web_login_ok});
+      }
+      if (states.length === 0) return '登录态：未保存';
+      const checked = states.filter(state => state.checked);
+      if (checked.length === 0) return '登录态：未检测';
+      const okCount = checked.filter(state => state.ok).length;
+      const failedCount = checked.length - okCount;
+      if (failedCount === 0 && checked.length === states.length) return '登录态：正常';
+      if (okCount === 0 && checked.length === states.length) return '登录态：异常';
+      return '登录态：部分正常';
     }
 
     function syncCreateAccountSelection(sessions) {
@@ -1119,16 +1139,15 @@
       sessionCheckInFlight = true;
       const button = $('sessionCheckButton');
       if (button) button.disabled = true;
-      if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = '正在检测 iCloud Mail 登录态...';
+      if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = '正在检测新接口和旧接口登录态...';
       try {
         const data = await api('/api/icloud/session/check', {method:'POST', body:'{}'});
         renderICloudSessions(data.sessions || (data.session && data.session.saved ? [data.session] : []));
-        const checkedAt = data.checked_at || (data.session && data.session.last_checked_at) || '-';
-        if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = `最近检测正常：${checkedAt}`;
-        log(data.message || '登录态检测正常：iCloud Mail 可同步');
+        if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = data.message || '登录态检测完成';
+        log(data.message || '登录态检测正常：新旧接口状态已刷新');
       } catch (err) {
-        if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = '最近检测失败；请重新保存登录态。';
-        log('登录态检测失败：' + err.message + '；请重新保存登录态');
+        if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = '登录态检测失败；请按失败提示重新保存对应登录态。';
+        log('登录态检测失败：' + err.message + '；请按失败提示重新保存对应登录态');
         await refresh().catch(() => {});
       } finally {
         if (button) button.disabled = false;
@@ -1429,23 +1448,13 @@
         const title = session.apple_id || session.account_id || `账号 ${index + 1}`;
         return `<button class="${key === activeICloudSessionKey ? 'active' : ''}" onclick="setICloudSessionTab(${esc(JSON.stringify(key))})">${esc(title)}</button>`;
       }).join('');
-      const flags = [
-        active.is_icloud_plus ? 'iCloud+ active' : '无 iCloud+',
-        `Cookie ${active.cookie_count || 0}`
-      ].join(' / ');
-      const checkLine = active.last_checked_at
-        ? `最近检测：${active.last_check_ok ? '正常' : '失败'} / ${active.last_checked_at}`
-        : '最近检测：未检测';
       $('icloudSessionInfo').innerHTML =
         `<div>已保存 ${sessions.length} 个 Apple 登录态，点击 TAB 切换查看。</div>` +
         `<div class="session-tabs">${tabs}</div>` +
         `<div class="session-card">Apple ID：${esc(active.apple_id || '-')}<br>` +
-        `账号ID：${esc(active.account_id || '-')}，DSID=${esc(active.dsid_mask || '-')}<br>` +
+        `账号ID：${esc(active.account_id || '-')}<br>` +
         `<div class="login-chips">${sessionLoginBadges(active)}</div>` +
-        `${esc(flags)}<br>` +
-        `${esc(checkLine)}<br>` +
-        `状态：${esc(active.last_status_message || '-')}<br>` +
-        `保存时间：${esc(active.saved_at || '-')}</div>`;
+        `${esc(overallLoginStateText(active))}</div>`;
       renderCreateAccountSelector();
     }
 

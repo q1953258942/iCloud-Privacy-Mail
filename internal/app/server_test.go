@@ -376,6 +376,37 @@ func TestPublicSessionSeparatesLoginStateKinds(t *testing.T) {
 	}
 }
 
+func TestPublicSessionExposesPerLoginStateCheckStatus(t *testing.T) {
+	checkedAt := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
+	got := publicSession(&ICloudSession{
+		SavedAt: time.Now(),
+		AppleID: "state@example.com",
+		LoginStates: []LoginState{
+			{
+				Kind:              LoginStateAppleAccount,
+				Scnt:              "scnt",
+				APIKey:            "api-key",
+				LastCheckedAt:     checkedAt,
+				LastCheckOK:       true,
+				LastStatusMessage: "新接口登录态正常",
+			},
+			{
+				Kind:              LoginStateICloudWeb,
+				Cookies:           []SessionCookie{{Name: "icloud", Value: "ok"}},
+				LastCheckedAt:     checkedAt,
+				LastCheckOK:       false,
+				LastStatusMessage: "旧接口登录态异常",
+			},
+		},
+	})
+	if !got.AppleAccountLoginChecked || !got.AppleAccountLoginOK || got.AppleAccountLoginStatus != "登录态正常" {
+		t.Fatalf("apple account status = checked:%t ok:%t text:%q", got.AppleAccountLoginChecked, got.AppleAccountLoginOK, got.AppleAccountLoginStatus)
+	}
+	if !got.ICloudWebLoginChecked || got.ICloudWebLoginOK || got.ICloudWebLoginStatus != "登录态异常" {
+		t.Fatalf("icloud web status = checked:%t ok:%t text:%q", got.ICloudWebLoginChecked, got.ICloudWebLoginOK, got.ICloudWebLoginStatus)
+	}
+}
+
 func TestStatusReturnsOwnerICloudSessionForAdminUser(t *testing.T) {
 	store := newTestStore(t)
 	handler := NewServer(Config{}, store, discardLogger())
@@ -513,6 +544,65 @@ func TestICloudClientCreatePrivacyMailboxWithAppleAccountRequiresManageSession(t
 	}
 	if coded.code != "apple_account_session_missing" {
 		t.Fatalf("code = %q, want apple_account_session_missing", coded.code)
+	}
+}
+
+func TestCheckSavedLoginStatesChecksAppleAccountState(t *testing.T) {
+	oldBaseURL := appleAccountManageBaseURL
+	defer func() { appleAccountManageBaseURL = oldBaseURL }()
+
+	var paths []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /account/manage/gs/ws/token":
+			if r.Header.Get("scnt") != "scnt-token" {
+				t.Fatalf("token scnt header = %q, want scnt-token", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "scnt-after-token")
+			_, _ = w.Write([]byte(`{"timeOutInterval":15}`))
+		case "GET /account/manage":
+			if r.Header.Get("scnt") != "scnt-after-token" {
+				t.Fatalf("manage scnt header = %q, want scnt-after-token", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "scnt-after-manage")
+			_, _ = w.Write([]byte(`{"apiKey":"account-key"}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer ts.Close()
+	appleAccountManageBaseURL = ts.URL
+
+	checkedAt := time.Date(2026, 6, 30, 13, 0, 0, 0, time.UTC)
+	client := &ICloudClient{client: ts.Client()}
+	session, ok, err := checkSavedLoginStates(context.Background(), client, ICloudSession{
+		LoginStates: []LoginState{{
+			Kind:   LoginStateAppleAccount,
+			Origin: appleAccountManageOrigin,
+			Scnt:   "scnt-token",
+		}},
+	}, checkedAt)
+	if err != nil || !ok {
+		t.Fatalf("checkSavedLoginStates err=%v ok=%t", err, ok)
+	}
+	state, found := appleAccountLoginState(session)
+	if !found {
+		t.Fatalf("apple account state missing: %+v", session.LoginStates)
+	}
+	if state.APIKey != "account-key" || state.Scnt != "scnt-after-manage" || !state.LastCheckOK || !state.LastCheckedAt.Equal(checkedAt) || state.LastStatusMessage != "新接口登录态正常" {
+		t.Fatalf("updated state = %+v", state)
+	}
+	if !session.LastCheckOK || !strings.Contains(session.LastStatusMessage, "新接口正常") {
+		t.Fatalf("session check status = ok:%t message:%q", session.LastCheckOK, session.LastStatusMessage)
+	}
+	wantPaths := []string{
+		"GET /account/manage/gs/ws/token",
+		"GET /account/manage",
+	}
+	if strings.Join(paths, "\n") != strings.Join(wantPaths, "\n") {
+		t.Fatalf("paths = %#v, want %#v", paths, wantPaths)
 	}
 }
 
