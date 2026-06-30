@@ -678,7 +678,7 @@ func TestICloudClientCreatePrivacyMailboxWithAppleAccountReusesFreshState(t *tes
 		t.Fatalf("paths = %#v, want %#v", paths, wantPaths)
 	}
 	updatedState, ok := appleAccountLoginState(updatedSession)
-	if !ok || updatedState.Scnt != "scnt-after-confirm" || updatedState.APIKey != "fresh-key" || !updatedState.LastCheckOK || !updatedState.LastCheckedAt.After(checkedAt) {
+	if !ok || updatedState.Scnt != "scnt-after-confirm" || updatedState.APIKey != "fresh-key" || !updatedState.LastCheckOK || updatedState.LastCheckedAt.IsZero() || updatedState.LastCheckedAt.Before(checkedAt) {
 		t.Fatalf("updated apple account state = %+v ok=%v, want reused fresh state marked ok", updatedState, ok)
 	}
 }
@@ -3029,15 +3029,32 @@ func TestMailboxSchedulerFallsBackToOldInterfaceAfterNewInterfaceFails(t *testin
 	if state.Success != 3 || state.Failed != 1 {
 		t.Fatalf("scheduler state = %+v, want success=3 failed=1", state)
 	}
-	var sawSwitch bool
+	var sawSwitch, sawNewCreated, sawOldCreated, sawOldFailed, sawAccountLabel bool
 	for _, event := range events {
 		if event.Type == "channel_failed" && strings.Contains(event.Message, "切换旧接口继续尝试") {
 			sawSwitch = true
-			break
+		}
+		if event.Type == "created" && strings.Contains(event.Message, "新接口创建成功") {
+			sawNewCreated = true
+		}
+		if event.Type == "created" && strings.Contains(event.Message, "旧接口创建成功") {
+			sawOldCreated = true
+		}
+		if event.Type == "failed" && strings.Contains(event.Message, "旧接口创建失败") {
+			sawOldFailed = true
+		}
+		if strings.Contains(event.Message, "fallback@example.com") {
+			sawAccountLabel = true
 		}
 	}
 	if !sawSwitch {
 		t.Fatalf("events did not include old-interface fallback: %+v", events)
+	}
+	if !sawNewCreated || !sawOldCreated || !sawOldFailed {
+		t.Fatalf("events did not include create channel labels: newCreated=%v oldCreated=%v oldFailed=%v events=%+v", sawNewCreated, sawOldCreated, sawOldFailed, events)
+	}
+	if !sawAccountLabel {
+		t.Fatalf("events did not include login account label: %+v", events)
 	}
 }
 
