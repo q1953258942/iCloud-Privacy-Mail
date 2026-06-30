@@ -947,7 +947,7 @@ func TestICloudClientCreatePrivacyMailboxWithAppleAccountRefreshesExpiredManageS
 			Scnt:            "stale-scnt",
 			APIKey:          "stale-key",
 			LastCheckedAt:   now.Add(-2 * time.Minute),
-			ManageExpiresAt: now.Add(30 * time.Second),
+			ManageExpiresAt: now.Add(-30 * time.Second),
 			LastCheckOK:     true,
 		}},
 	}, "", "LAB", "")

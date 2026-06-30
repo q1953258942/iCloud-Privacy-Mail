@@ -53,7 +53,7 @@ func NewICloudClient() *ICloudClient {
 }
 
 const mailboxSyncCursorOverlap = 2 * time.Minute
-const appleAccountManageRefreshSkew = time.Minute
+const appleAccountManageRefreshSkew = 0 * time.Second
 
 var appleAccountManageBaseURL = "https://appleid.apple.com"
 var appleAccountOperationMu sync.Mutex

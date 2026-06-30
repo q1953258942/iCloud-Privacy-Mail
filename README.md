@@ -146,7 +146,7 @@ http://127.0.0.1:8787/login
 
 创建邮箱时，后端会优先使用 `apple_account` 新接口；如果账号只有旧 `icloud_web` 登录态，则仍可按旧接口创建。两种登录态互不覆盖，账号数据、邮箱归属和 API 地址仍沿用原来的保存方式。两种登录态都保存后可以一起创建：新接口每小时约 20 个，旧接口每小时约 5 个，合计约 25 个/小时。
 
-新接口的 `account/manage` 管理态和浏览器里的 “Remember me” 不等同于旧 iCloud Web 的长效 Cookie。Apple Account 管理接口返回的是短期活动窗口，后端会按 Apple 返回的 TTL 提前刷新 `scnt`、Cookie 和 `apiKey`；刷新成功后才写回状态文件，非 2xx 失败响应不会覆盖已保存的 `scnt` 或 Cookie。旧接口之所以更长效，是因为它额外完成 `2sv/trust`、`accountLogin` 的 `extended_login` 交换，并保存 iCloud WebServices Cookie。
+新接口的 `account/manage` 管理态和浏览器里的 “Remember me” 不等同于旧 iCloud Web 的长效 Cookie。Apple Account 管理接口返回的是短期活动窗口，后端会按 Apple 返回的 TTL 到期时间刷新 `scnt`、Cookie 和 `apiKey`；刷新成功后才写回状态文件，非 2xx 失败响应不会覆盖已保存的 `scnt` 或 Cookie。旧接口之所以更长效，是因为它额外完成 `2sv/trust`、`accountLogin` 的 `extended_login` 交换，并保存 iCloud WebServices Cookie。
 
 排障时可使用 `IPM_DEBUG_APPLE_ACCOUNT=1` 查看脱敏后的请求摘要。日志只输出 method/path、状态码、Cookie 长度和响应头指纹；响应体中的 API key、token、session、账号和邮箱字段会被脱敏，不输出完整 Cookie、`scnt`、密码或验证码。
 
