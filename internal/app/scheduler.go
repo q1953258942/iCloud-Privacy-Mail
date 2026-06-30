@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	defaultMailboxSchedulerBatchSize = 5
+	defaultMailboxSchedulerBatchSize = 1
 	defaultMailboxSchedulerInterval  = 60 * time.Minute
 	maxMailboxSchedulerBatchSize     = 200
 	maxMailboxSchedulerEvents        = 200
@@ -142,14 +142,8 @@ func (s *Server) handleStartMailboxScheduler(w http.ResponseWriter, r *http.Requ
 		AccountIDs: accountIDs,
 		Label:      strings.TrimSpace(payload.Label),
 		Note:       strings.TrimSpace(payload.Note),
-		BatchSize:  payload.BatchSize,
+		BatchSize:  defaultMailboxSchedulerBatchSize,
 		Interval:   defaultMailboxSchedulerInterval,
-	}
-	if cfg.BatchSize <= 0 {
-		cfg.BatchSize = defaultMailboxSchedulerBatchSize
-	}
-	if cfg.BatchSize > maxMailboxSchedulerBatchSize {
-		cfg.BatchSize = maxMailboxSchedulerBatchSize
 	}
 	if payload.IntervalSeconds > 0 {
 		cfg.Interval = time.Duration(payload.IntervalSeconds) * time.Second
@@ -240,7 +234,7 @@ func (s *Server) runMailboxScheduler(ctx context.Context, ownerID string, job *m
 		job.state.Status = "creating"
 		job.state.LastRunAt = time.Now()
 		job.state.NextRunAt = time.Time{}
-		job.addEventLocked("batch_started", fmt.Sprintf("开始第 %d 次定时创建：本次最多 %d 轮，每轮勾选账号同时创建", batch, cfg.BatchSize), batch, Mailbox{}, nil)
+		job.addEventLocked("batch_started", schedulerBatchStartedMessage(batch), batch, Mailbox{}, nil)
 		job.mu.Unlock()
 
 		s.runMailboxSchedulerBatch(ctx, ownerID, job, cfg, batch)
@@ -252,7 +246,7 @@ func (s *Server) runMailboxScheduler(ctx context.Context, ownerID string, job *m
 		job.mu.Lock()
 		job.state.Status = "waiting"
 		job.state.NextRunAt = nextRunAt
-		job.addEventLocked("waiting", fmt.Sprintf("进入等待：%s 后继续下一轮", cfg.Interval.Round(time.Second)), batch, Mailbox{}, nil)
+		job.addEventLocked("waiting", fmt.Sprintf("进入等待：%s 后重新尝试全部账号", cfg.Interval.Round(time.Second)), batch, Mailbox{}, nil)
 		job.mu.Unlock()
 
 		timer := time.NewTimer(cfg.Interval)
@@ -275,7 +269,7 @@ func (s *Server) runMailboxSchedulerBatch(ctx context.Context, ownerID string, j
 		}
 	}
 	skippedThisBatch := make(map[string]bool)
-	for index := 1; index <= cfg.BatchSize; index++ {
+	for index := 1; ; index++ {
 		if ctx.Err() != nil {
 			return
 		}
@@ -286,7 +280,7 @@ func (s *Server) runMailboxSchedulerBatch(ctx context.Context, ownerID string, j
 			job.mu.Unlock()
 			return
 		}
-		label := schedulerMailboxLabel(cfg.Label, batch, index, cfg.BatchSize)
+		label := schedulerMailboxLabel(cfg.Label, batch, index, 0)
 		mailboxes, _, failures, err := s.createMailboxesForOwner(ctx, ownerID, activeAccountIDs, label, cfg.Note)
 		if err != nil && len(mailboxes) == 0 && len(failures) == 0 {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -297,7 +291,7 @@ func (s *Server) runMailboxSchedulerBatch(ctx context.Context, ownerID string, j
 			job.mu.Lock()
 			job.state.Failed++
 			job.state.LastError = message
-			job.addEventLocked("failed", fmt.Sprintf("创建失败 %d/%d：%s", index, cfg.BatchSize, message), batch, Mailbox{}, err)
+			job.addEventLocked("failed", schedulerBatchFailedMessage(index, message), batch, Mailbox{}, err)
 			job.mu.Unlock()
 			return
 		}
@@ -305,7 +299,7 @@ func (s *Server) runMailboxSchedulerBatch(ctx context.Context, ownerID string, j
 		job.state.Success += len(mailboxes)
 		job.state.LastError = ""
 		for _, mailbox := range mailboxes {
-			job.addEventLocked("created", fmt.Sprintf("第 %d/%d 轮创建成功：%s", index, cfg.BatchSize, mailbox.Email), batch, mailbox, nil)
+			job.addEventLocked("created", schedulerMailboxCreatedMessage(index, mailbox.Email), batch, mailbox, nil)
 		}
 		if len(failures) > 0 {
 			job.state.Failed += len(failures)
@@ -314,11 +308,27 @@ func (s *Server) runMailboxSchedulerBatch(ctx context.Context, ownerID string, j
 				if accountID := strings.TrimSpace(failure.AccountID); accountID != "" {
 					skippedThisBatch[accountID] = true
 				}
-				job.addEventLocked("failed", fmt.Sprintf("第 %d/%d 轮账号创建失败：%s，本次定时创建临时跳过该账号，下一次定时创建再试", index, cfg.BatchSize, failure.Error), batch, Mailbox{}, errors.New(failure.Error))
+				job.addEventLocked("failed", schedulerAccountFailedMessage(index, failure.Error), batch, Mailbox{}, errors.New(failure.Error))
 			}
 		}
 		job.mu.Unlock()
 	}
+}
+
+func schedulerBatchStartedMessage(batch int) string {
+	return fmt.Sprintf("开始第 %d 次定时创建：勾选账号同时创建，失败账号本轮临时跳过，直到全部临时失败后等待下次", batch)
+}
+
+func schedulerBatchFailedMessage(index int, message string) string {
+	return fmt.Sprintf("第 %d 轮创建失败：%s", index, message)
+}
+
+func schedulerMailboxCreatedMessage(index int, email string) string {
+	return fmt.Sprintf("第 %d 轮创建成功：%s", index, email)
+}
+
+func schedulerAccountFailedMessage(index int, message string) string {
+	return fmt.Sprintf("第 %d 轮账号创建失败：%s，本次定时创建临时跳过该账号，下一次定时创建再试", index, message)
 }
 
 func activeSchedulerAccountIDs(accountIDs []string, skipped map[string]bool) []string {
@@ -450,6 +460,12 @@ func schedulerMailboxLabel(base string, batch, index, total int) string {
 	base = strings.TrimSpace(base)
 	if base == "" {
 		base = "UPI-" + time.Now().Format("0102-150405")
+	}
+	if total <= 0 {
+		if index <= 1 {
+			return base
+		}
+		return fmt.Sprintf("%s-B%03d-%02d", base, batch, index)
 	}
 	if total <= 1 {
 		return base

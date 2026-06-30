@@ -38,6 +38,7 @@ type Server struct {
 	icloudProtocolLogins  *appleAuthPendingStore
 	appleAccountLogins    *appleAuthPendingStore
 	icloudCreateMu        sync.Mutex
+	icloudCreateGates     map[string]chan struct{}
 	icloudCreateLast      map[string]time.Time
 	icloudCreateCooldown  map[string]time.Time
 	icloudMailSyncMu      sync.Mutex
@@ -98,6 +99,7 @@ func NewServer(cfg Config, store *FileStore, logger *slog.Logger) http.Handler {
 		mux:                  http.NewServeMux(),
 		icloudProtocolLogins: newAppleAuthPendingStore(),
 		appleAccountLogins:   newAppleAuthPendingStore(),
+		icloudCreateGates:    make(map[string]chan struct{}),
 		icloudCreateLast:     make(map[string]time.Time),
 		icloudCreateCooldown: make(map[string]time.Time),
 		icloudMailSyncGates:  make(map[string]chan struct{}),
@@ -1993,22 +1995,46 @@ func (s *Server) createMailboxesForOwner(ctx context.Context, ownerID string, ac
 	remotes := make([]ICloudRemoteMailbox, 0, len(sessions))
 	failures := make([]createMailboxFailure, 0)
 	var firstErr error
-	for _, session := range sessions {
-		effectiveAccountID := session.AccountID
-		mailbox, remote, err := s.createMailboxForOwner(ctx, ownerID, effectiveAccountID, label, note)
-		if err != nil {
+	type createResult struct {
+		session   ICloudSession
+		mailbox   Mailbox
+		remote    ICloudRemoteMailbox
+		err       error
+		accountID string
+	}
+	results := make([]createResult, len(sessions))
+	var wg sync.WaitGroup
+	for index, session := range sessions {
+		index, session := index, session
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			effectiveAccountID := session.AccountID
+			mailbox, remote, err := s.createMailboxForOwner(ctx, ownerID, effectiveAccountID, label, note)
+			results[index] = createResult{
+				session:   session,
+				mailbox:   mailbox,
+				remote:    remote,
+				err:       err,
+				accountID: effectiveAccountID,
+			}
+		}()
+	}
+	wg.Wait()
+	for _, result := range results {
+		if result.err != nil {
 			if firstErr == nil {
-				firstErr = err
+				firstErr = result.err
 			}
 			failures = append(failures, createMailboxFailure{
-				AccountID: effectiveAccountID,
-				AppleID:   maskAppleID(session.AppleID),
-				Error:     err.Error(),
+				AccountID: result.accountID,
+				AppleID:   maskAppleID(result.session.AppleID),
+				Error:     result.err.Error(),
 			})
 			continue
 		}
-		mailboxes = append(mailboxes, mailbox)
-		remotes = append(remotes, remote)
+		mailboxes = append(mailboxes, result.mailbox)
+		remotes = append(remotes, result.remote)
 	}
 	if len(mailboxes) == 0 && firstErr != nil {
 		return mailboxes, remotes, failures, firstErr
@@ -2023,25 +2049,18 @@ func (s *Server) createICloudMailboxRemote(ctx context.Context, ownerID string, 
 	}
 	key += ":" + firstNonEmpty(session.AccountID, session.DSID, session.AppleID, "default")
 
-	s.icloudCreateMu.Lock()
-	defer s.icloudCreateMu.Unlock()
-
-	now := time.Now()
-	if last := s.icloudCreateLast[key]; !last.IsZero() {
-		if wait := last.Add(mailboxCreateMinInterval).Sub(now); wait > 0 {
-			timer := time.NewTimer(wait)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return ICloudRemoteMailbox{}, ctx.Err()
-			case <-timer.C:
-			}
-		}
+	release, err := s.acquireMailboxCreateGate(ctx, key)
+	if err != nil {
+		return ICloudRemoteMailbox{}, err
+	}
+	defer release()
+	if err := s.waitMailboxCreateInterval(ctx, key); err != nil {
+		return ICloudRemoteMailbox{}, err
 	}
 
 	if _, ok := appleAccountLoginState(session); ok {
 		remote, updatedSession, err := NewICloudClient().CreatePrivacyMailboxWithAppleAccount(ctx, session, s.cfg.AppleAccountAPIKey, label, note)
-		s.icloudCreateLast[key] = time.Now()
+		s.markMailboxCreateFinished(key)
 		if err == nil {
 			if saveErr := s.store.SaveICloudSessionForOwner(ownerID, updatedSession); saveErr != nil {
 				s.logger.Warn("failed to save updated Apple Account login state", "account_id", session.AccountID, "err", saveErr)
@@ -2054,24 +2073,99 @@ func (s *Server) createICloudMailboxRemote(ctx context.Context, ownerID string, 
 		s.logger.Warn("Apple Account mailbox create failed; falling back to iCloud HME", "account_id", session.AccountID, "err", err)
 	}
 
-	now = time.Now()
-	if cooldownUntil := s.icloudCreateCooldown[key]; cooldownUntil.After(now) {
-		remaining := int(cooldownUntil.Sub(now).Round(time.Second).Seconds())
+	if cooldownRemaining := s.mailboxCreateCooldownRemaining(key); cooldownRemaining > 0 {
+		remaining := int(cooldownRemaining.Round(time.Second).Seconds())
 		if remaining < 1 {
 			remaining = 1
 		}
 		return ICloudRemoteMailbox{}, errCode("icloud_hme_limit", fmt.Sprintf("iCloud 创建上限冷却中，请约 %d 秒后再试", remaining), true)
-	} else if !cooldownUntil.IsZero() {
-		delete(s.icloudCreateCooldown, key)
 	}
 
 	remote, err := NewICloudClient().CreatePrivacyMailbox(ctx, session, label, note)
-	s.icloudCreateLast[key] = time.Now()
+	s.markMailboxCreateFinished(key)
 	var coded codedError
 	if errors.As(err, &coded) && coded.code == "icloud_hme_limit" {
-		s.icloudCreateCooldown[key] = time.Now().Add(mailboxCreateLimitCooldown)
+		s.markMailboxCreateCooldown(key, mailboxCreateLimitCooldown)
 	}
 	return remote, err
+}
+
+func (s *Server) acquireMailboxCreateGate(ctx context.Context, key string) (func(), error) {
+	s.icloudCreateMu.Lock()
+	gate := s.icloudCreateGates[key]
+	if gate == nil {
+		gate = make(chan struct{}, 1)
+		s.icloudCreateGates[key] = gate
+	}
+	s.icloudCreateMu.Unlock()
+
+	select {
+	case gate <- struct{}{}:
+		return func() { <-gate }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (s *Server) waitMailboxCreateInterval(ctx context.Context, key string) error {
+	interval := mailboxCreateMinInterval
+	if interval <= 0 {
+		return nil
+	}
+	s.icloudCreateMu.Lock()
+	last := s.icloudCreateLast[key]
+	s.icloudCreateMu.Unlock()
+	if last.IsZero() {
+		return nil
+	}
+	wait := interval - time.Since(last)
+	if wait <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Server) markMailboxCreateFinished(key string) {
+	s.icloudCreateMu.Lock()
+	if s.icloudCreateLast == nil {
+		s.icloudCreateLast = make(map[string]time.Time)
+	}
+	s.icloudCreateLast[key] = time.Now()
+	s.icloudCreateMu.Unlock()
+}
+
+func (s *Server) mailboxCreateCooldownRemaining(key string) time.Duration {
+	now := time.Now()
+	s.icloudCreateMu.Lock()
+	defer s.icloudCreateMu.Unlock()
+	cooldownUntil := s.icloudCreateCooldown[key]
+	if cooldownUntil.IsZero() {
+		return 0
+	}
+	if !cooldownUntil.After(now) {
+		delete(s.icloudCreateCooldown, key)
+		return 0
+	}
+	return cooldownUntil.Sub(now)
+}
+
+func (s *Server) markMailboxCreateCooldown(key string, duration time.Duration) {
+	if duration <= 0 {
+		return
+	}
+	s.icloudCreateMu.Lock()
+	if s.icloudCreateCooldown == nil {
+		s.icloudCreateCooldown = make(map[string]time.Time)
+	}
+	s.icloudCreateCooldown[key] = time.Now().Add(duration)
+	s.icloudCreateMu.Unlock()
 }
 
 func (s *Server) logICloudCreateError(ownerID string, err error) {
@@ -2637,6 +2731,8 @@ func publicSession(session *ICloudSession) publicICloudSession {
 	if message == "" {
 		message = "登录态已保存；Cookie 原文只写入本地 data/state.json，不会返回前端"
 	}
+	icloudWebLoginSaved := iCloudWebLoginSaved(*session)
+	appleAccountLoginSaved := appleAccountLoginSaved(*session)
 	return publicICloudSession{
 		Saved:                   true,
 		AccountID:               session.AccountID,
@@ -2652,13 +2748,32 @@ func publicSession(session *ICloudSession) publicICloudSession {
 		IsICloudPlus:            session.IsICloudPlus,
 		CanCreateHME:            session.CanCreateHME,
 		CookieCount:             len(session.Cookies),
+		ICloudWebLoginSaved:     icloudWebLoginSaved,
+		AppleAccountLoginSaved:  appleAccountLoginSaved,
 		AppleAccountManageReady: appleAccountManageReady(*session),
-		ProviderConfigured:      session.IsICloudPlus && session.CanCreateHME && len(session.Cookies) > 0,
-		NeedsManualLogin:        len(session.Cookies) == 0,
+		ProviderConfigured:      session.IsICloudPlus && session.CanCreateHME && icloudWebLoginSaved,
+		NeedsManualLogin:        !icloudWebLoginSaved && !appleAccountLoginSaved,
 		LastCheckedAt:           formatTime(session.LastCheckedAt),
 		LastCheckOK:             session.LastCheckOK,
 		LastStatusMessage:       message,
 	}
+}
+
+func iCloudWebLoginSaved(session ICloudSession) bool {
+	if len(session.Cookies) > 0 {
+		return true
+	}
+	for _, state := range session.LoginStates {
+		if state.Kind == LoginStateICloudWeb && len(state.Cookies) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func appleAccountLoginSaved(session ICloudSession) bool {
+	_, ok := appleAccountLoginState(session)
+	return ok
 }
 
 func publicSessionForAppleID(sessions []publicICloudSession, appleID string) publicICloudSession {

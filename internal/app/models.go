@@ -329,6 +329,8 @@ type publicICloudSession struct {
 	IsICloudPlus            bool   `json:"is_icloud_plus"`
 	CanCreateHME            bool   `json:"can_create_hme"`
 	CookieCount             int    `json:"cookie_count"`
+	ICloudWebLoginSaved     bool   `json:"icloud_web_login_saved"`
+	AppleAccountLoginSaved  bool   `json:"apple_account_login_saved"`
 	AppleAccountManageReady bool   `json:"apple_account_manage_ready"`
 	ProviderConfigured      bool   `json:"provider_configured"`
 	NeedsManualLogin        bool   `json:"needs_manual_login"`

@@ -342,6 +342,40 @@ func TestPublicSessionIncludesLastCheckStatus(t *testing.T) {
 	}
 }
 
+func TestPublicSessionSeparatesLoginStateKinds(t *testing.T) {
+	appleOnly := publicSession(&ICloudSession{
+		SavedAt: time.Now(),
+		AppleID: "apple@example.com",
+		DSID:    "123456",
+		LoginStates: []LoginState{{
+			Kind:   LoginStateAppleAccount,
+			Scnt:   "scnt",
+			APIKey: "api-key",
+		}},
+	})
+	if !appleOnly.AppleAccountLoginSaved || !appleOnly.AppleAccountManageReady {
+		t.Fatalf("apple account state not exposed: %+v", appleOnly)
+	}
+	if appleOnly.ICloudWebLoginSaved || appleOnly.NeedsManualLogin {
+		t.Fatalf("apple-only state mixed with iCloud web: %+v", appleOnly)
+	}
+
+	icloudOnly := publicSession(&ICloudSession{
+		SavedAt:      time.Now(),
+		AppleID:      "icloud@example.com",
+		DSID:         "654321",
+		IsICloudPlus: true,
+		CanCreateHME: true,
+		Cookies:      []SessionCookie{{Name: "session", Value: "x", Domain: ".icloud.com", Path: "/"}},
+	})
+	if !icloudOnly.ICloudWebLoginSaved || !icloudOnly.ProviderConfigured {
+		t.Fatalf("icloud web state not exposed: %+v", icloudOnly)
+	}
+	if icloudOnly.AppleAccountLoginSaved || icloudOnly.AppleAccountManageReady {
+		t.Fatalf("icloud-only state mixed with apple account: %+v", icloudOnly)
+	}
+}
+
 func TestStatusReturnsOwnerICloudSessionForAdminUser(t *testing.T) {
 	store := newTestStore(t)
 	handler := NewServer(Config{}, store, discardLogger())
@@ -2251,6 +2285,9 @@ func TestMailboxSchedulerStartsCreatesAndStops(t *testing.T) {
 		default:
 		}
 		n := atomic.AddInt64(&seq, 1)
+		if n > 2 {
+			return Mailbox{}, ICloudRemoteMailbox{}, errCode("icloud_hme_limit", "当前小时额度已用完", true)
+		}
 		mailbox, err := store.AddMailboxForOwner(ownerID, accountID, label, fmt.Sprintf("sched-%d@icloud.com", n))
 		if err != nil {
 			return Mailbox{}, ICloudRemoteMailbox{}, err
@@ -2259,7 +2296,7 @@ func TestMailboxSchedulerStartsCreatesAndStops(t *testing.T) {
 	}
 
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/icloud/scheduler/start", strings.NewReader(`{"batch_size":2,"interval_seconds":60,"label":"SCH"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/icloud/scheduler/start", strings.NewReader(`{"batch_size":200,"interval_seconds":60,"label":"SCH"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(cookie)
 	handler.ServeHTTP(rr, req)
@@ -2282,13 +2319,16 @@ func TestMailboxSchedulerStartsCreatesAndStops(t *testing.T) {
 		if err := json.Unmarshal(rr.Body.Bytes(), &status); err != nil {
 			t.Fatal(err)
 		}
-		if status.Scheduler.Success >= 2 {
+		if status.Scheduler.Success >= 2 && status.Scheduler.Failed >= 1 {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if status.Scheduler.Success != 2 || len(status.Scheduler.Events) == 0 {
-		t.Fatalf("scheduler did not create 2 mailboxes: %+v", status.Scheduler)
+	if status.Scheduler.BatchSize != 1 {
+		t.Fatalf("scheduler batch size = %d, want hidden request batch_size ignored as 1", status.Scheduler.BatchSize)
+	}
+	if status.Scheduler.Success != 2 || status.Scheduler.Failed != 1 || len(status.Scheduler.Events) == 0 {
+		t.Fatalf("scheduler did not create until account failed: %+v", status.Scheduler)
 	}
 
 	rr = httptest.NewRecorder()
@@ -2305,6 +2345,123 @@ func TestMailboxSchedulerStartsCreatesAndStops(t *testing.T) {
 	if status.Scheduler.Running {
 		t.Fatalf("scheduler still running after stop: %+v", status.Scheduler)
 	}
+}
+
+func TestMailboxSchedulerRunsUntilAllAccountsFailWithOnlyInterval(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
+	server := handler.(*Server)
+	cookie, user := registerTestUser(t, handler, "timer-until-fail", "timer123")
+	for _, session := range []ICloudSession{
+		{
+			OwnerID:            user.ID,
+			AppleID:            "limit@example.com",
+			DSID:               "dsid-limit",
+			PremiumMailBaseURL: "https://example.invalid",
+			IsICloudPlus:       true,
+			CanCreateHME:       true,
+			Cookies:            []SessionCookie{{Name: "X-APPLE-WEBAUTH", Value: "cookie-1", Domain: ".icloud.com", Path: "/"}},
+		},
+		{
+			OwnerID:            user.ID,
+			AppleID:            "worker@example.com",
+			DSID:               "dsid-worker",
+			PremiumMailBaseURL: "https://example.invalid",
+			IsICloudPlus:       true,
+			CanCreateHME:       true,
+			Cookies:            []SessionCookie{{Name: "X-APPLE-WEBAUTH", Value: "cookie-2", Domain: ".icloud.com", Path: "/"}},
+		},
+	} {
+		if err := store.SaveICloudSessionForOwner(user.ID, session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sessions := store.ICloudSessionsForOwner(user.ID)
+	if len(sessions) != 2 {
+		t.Fatalf("sessions = %d, want 2", len(sessions))
+	}
+	limitAccountID := sessions[0].AccountID
+	workerAccountID := sessions[1].AccountID
+	accountIDs := []string{limitAccountID, workerAccountID}
+
+	var mu sync.Mutex
+	attempts := map[string]int{}
+	server.createMailboxForOwner = func(ctx context.Context, ownerID, accountID, label, note string) (Mailbox, ICloudRemoteMailbox, error) {
+		select {
+		case <-ctx.Done():
+			return Mailbox{}, ICloudRemoteMailbox{}, ctx.Err()
+		default:
+		}
+		mu.Lock()
+		attempts[accountID]++
+		n := attempts[accountID]
+		mu.Unlock()
+		if accountID == limitAccountID {
+			return Mailbox{}, ICloudRemoteMailbox{}, errCode("icloud_hme_limit", "第一个账号额度已用完", true)
+		}
+		if n > 2 {
+			return Mailbox{}, ICloudRemoteMailbox{}, errCode("icloud_hme_limit", "第二个账号额度已用完", true)
+		}
+		mailbox, err := store.AddMailboxForOwner(ownerID, accountID, label, fmt.Sprintf("%s-%d@icloud.com", accountID, n))
+		if err != nil {
+			return Mailbox{}, ICloudRemoteMailbox{}, err
+		}
+		return mailbox, ICloudRemoteMailbox{Email: mailbox.Email, Label: mailbox.Label, IsActive: true}, nil
+	}
+
+	body := fmt.Sprintf(`{"account_ids":["%s","%s"],"interval_seconds":60,"label":"SCH"}`, accountIDs[0], accountIDs[1])
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/icloud/scheduler/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("start scheduler = %d body=%s", rr.Code, rr.Body.String())
+	}
+	defer func() {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/icloud/scheduler/stop", strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(cookie)
+		handler.ServeHTTP(rr, req)
+	}()
+
+	var status struct {
+		Scheduler publicMailboxScheduler `json:"scheduler"`
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rr = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodGet, "/api/icloud/scheduler/status", nil)
+		req.AddCookie(cookie)
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("scheduler status = %d body=%s", rr.Code, rr.Body.String())
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &status); err != nil {
+			t.Fatal(err)
+		}
+		if status.Scheduler.Success >= 2 && status.Scheduler.Failed >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if status.Scheduler.BatchSize != 1 {
+		t.Fatalf("scheduler batch size = %d, want 1", status.Scheduler.BatchSize)
+	}
+	if status.Scheduler.Success != 2 || status.Scheduler.Failed != 2 {
+		t.Fatalf("scheduler state = success %d failed %d, want success=2 failed=2: %+v", status.Scheduler.Success, status.Scheduler.Failed, status.Scheduler)
+	}
+	mu.Lock()
+	if attempts[limitAccountID] != 1 {
+		mu.Unlock()
+		t.Fatalf("limited account attempts = %d, want 1; attempts=%+v", attempts[limitAccountID], attempts)
+	}
+	if attempts[workerAccountID] != 3 {
+		mu.Unlock()
+		t.Fatalf("worker account attempts = %d, want 3; attempts=%+v", attempts[workerAccountID], attempts)
+	}
+	mu.Unlock()
 }
 
 func TestMailboxSchedulerSkipsFailedAccountWithinCurrentBatch(t *testing.T) {
@@ -2326,37 +2483,46 @@ func TestMailboxSchedulerSkipsFailedAccountWithinCurrentBatch(t *testing.T) {
 	}
 	badAccountID := sessions[0].AccountID
 	goodAccountID := sessions[1].AccountID
+	var attemptsMu sync.Mutex
 	attempts := map[string]int{}
 	server.createMailboxForOwner = func(ctx context.Context, ownerID, accountID, label, note string) (Mailbox, ICloudRemoteMailbox, error) {
+		attemptsMu.Lock()
 		attempts[accountID]++
+		attempt := attempts[accountID]
+		attemptsMu.Unlock()
 		if accountID == badAccountID {
 			return Mailbox{}, ICloudRemoteMailbox{}, errCode("icloud_hme_limit", "当前小时额度已用完", true)
 		}
-		mailbox, err := store.AddMailboxForOwner(ownerID, accountID, label, fmt.Sprintf("good-%d@icloud.com", attempts[accountID]))
+		if attempt > 3 {
+			return Mailbox{}, ICloudRemoteMailbox{}, errCode("icloud_hme_limit", "好账号本轮也已用完", true)
+		}
+		mailbox, err := store.AddMailboxForOwner(ownerID, accountID, label, fmt.Sprintf("good-%d@icloud.com", attempt))
 		if err != nil {
 			return Mailbox{}, ICloudRemoteMailbox{}, err
 		}
 		return mailbox, ICloudRemoteMailbox{Email: mailbox.Email, Label: mailbox.Label, IsActive: true}, nil
 	}
 
-	job := &mailboxSchedulerJob{state: mailboxSchedulerState{Running: true, BatchSize: 3}}
+	job := &mailboxSchedulerJob{state: mailboxSchedulerState{Running: true, BatchSize: 1}}
 	server.runMailboxSchedulerBatch(context.Background(), ownerID, job, mailboxSchedulerConfig{
 		AccountIDs: []string{badAccountID, goodAccountID},
 		Label:      "SCH",
-		BatchSize:  3,
+		BatchSize:  1,
 	}, 1)
 	state, events := job.snapshot()
+	attemptsMu.Lock()
+	defer attemptsMu.Unlock()
 	if attempts[badAccountID] != 1 {
 		t.Fatalf("bad account attempts = %d, want 1; attempts=%+v", attempts[badAccountID], attempts)
 	}
-	if attempts[goodAccountID] != 3 {
-		t.Fatalf("good account attempts = %d, want 3; attempts=%+v", attempts[goodAccountID], attempts)
+	if attempts[goodAccountID] != 4 {
+		t.Fatalf("good account attempts = %d, want 4; attempts=%+v", attempts[goodAccountID], attempts)
 	}
-	if state.Success != 3 || state.Failed != 1 {
-		t.Fatalf("scheduler state = %+v, want success=3 failed=1", state)
+	if state.Success != 3 || state.Failed != 2 {
+		t.Fatalf("scheduler state = %+v, want success=3 failed=2", state)
 	}
-	if len(events) != 4 {
-		t.Fatalf("events = %d, want 4: %+v", len(events), events)
+	if len(events) != 6 {
+		t.Fatalf("events = %d, want 6: %+v", len(events), events)
 	}
 }
 
@@ -2514,12 +2680,15 @@ func TestCreateICloudMailboxUsesSelectedSavedSessions(t *testing.T) {
 	}
 	sessions := store.ICloudSessionsForOwner(user.ID)
 	selected := []string{sessions[0].AccountID, sessions[2].AccountID}
+	var createdMu sync.Mutex
 	createdAccounts := map[string]bool{}
 	server.createMailboxForOwner = func(ctx context.Context, ownerID, accountID, label, note string) (Mailbox, ICloudRemoteMailbox, error) {
 		if accountID == sessions[1].AccountID {
 			t.Fatalf("broken account %q should not be used", accountID)
 		}
+		createdMu.Lock()
 		createdAccounts[accountID] = true
+		createdMu.Unlock()
 		mailbox, err := store.AddMailboxForOwner(ownerID, accountID, label, accountID+"@icloud.com")
 		if err != nil {
 			return Mailbox{}, ICloudRemoteMailbox{}, err
@@ -2546,6 +2715,8 @@ func TestCreateICloudMailboxUsesSelectedSavedSessions(t *testing.T) {
 	if body.Created != 2 || len(body.Mailboxes) != 2 {
 		t.Fatalf("body = %+v, want two selected mailboxes", body)
 	}
+	createdMu.Lock()
+	defer createdMu.Unlock()
 	for _, accountID := range selected {
 		if !createdAccounts[accountID] {
 			t.Fatalf("selected account %q was not used; created=%+v", accountID, createdAccounts)

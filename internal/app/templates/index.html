@@ -243,6 +243,48 @@
       color: var(--muted);
       font-weight: 700;
     }
+    .login-status-wrap {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 6px;
+      text-align: right;
+    }
+    .login-chips {
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+    .login-chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      border: 1px solid rgba(100, 116, 139, .22);
+      border-radius: 999px;
+      padding: 3px 8px;
+      color: #475569;
+      background: #f8fafc;
+      font-size: 12px;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+    .login-chip.on {
+      color: #047857;
+      border-color: rgba(16, 185, 129, .26);
+      background: rgba(209, 250, 229, .72);
+    }
+    .login-chip.warn {
+      color: #a16207;
+      border-color: rgba(180, 83, 9, .24);
+      background: #fffbeb;
+    }
+    .login-chip.off {
+      color: #64748b;
+      border-color: rgba(100, 116, 139, .2);
+      background: #f8fafc;
+    }
     .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 16px 18px; }
     .field-grid .full, .form .full { grid-column: 1 / -1; }
     .panel-body { padding-bottom: 2px; }
@@ -503,8 +545,7 @@
             <span id="protoBatchProgress" class="muted">每次点击会让当前勾选账号同时创建 1 轮，并记录本次成功/失败数量。</span>
           </div>
           <div class="field-grid">
-            <label>定时每次轮数<input id="scheduleBatchSize" type="number" min="1" max="200" value="5" placeholder="默认 5"></label>
-            <label>定时间隔分钟<input id="scheduleIntervalMinutes" type="number" min="1" max="1440" value="60" placeholder="默认 60"></label>
+            <label class="full">定时间隔分钟<input id="scheduleIntervalMinutes" type="number" min="1" max="1440" value="60" placeholder="默认 60"></label>
           </div>
           <div class="toolbar">
             <button id="startScheduleButton" class="primary" onclick="startMailboxScheduler()">开始定时创建</button>
@@ -752,6 +793,38 @@
       return session.apple_id || session.account_label || session.dsid_mask || '未命名 Apple 账号';
     }
 
+    function iCloudWebLoginSaved(session) {
+      return !!(session && (session.icloud_web_login_saved || Number(session.cookie_count || 0) > 0));
+    }
+
+    function appleAccountLoginSaved(session) {
+      return !!(session && session.apple_account_login_saved);
+    }
+
+    function loginChip(label, value, mode) {
+      return `<span class="login-chip ${mode}">${esc(label)}：${esc(value)}</span>`;
+    }
+
+    function sessionLoginBadges(session) {
+      const newLogged = appleAccountLoginSaved(session);
+      const oldLogged = iCloudWebLoginSaved(session);
+      const newText = newLogged
+        ? (session.apple_account_manage_ready ? '已登录，可创建' : '已登录，待检测')
+        : '未登录';
+      const oldText = oldLogged
+        ? (session.can_create_hme ? '已登录，可创建' : '已登录，不可创建')
+        : '未登录';
+      return [
+        loginChip('新接口', newText, newLogged ? (session.apple_account_manage_ready ? 'on' : 'warn') : 'off'),
+        loginChip('旧接口', oldText, oldLogged ? (session.can_create_hme ? 'on' : 'warn') : 'off')
+      ].join('');
+    }
+
+    function sessionCheckText(session) {
+      if (!session || !session.last_checked_at) return '检测：未检测';
+      return `检测：${session.last_check_ok ? '正常' : '失败'}`;
+    }
+
     function syncCreateAccountSelection(sessions) {
       const ids = new Set((sessions || []).map(session => session.account_id).filter(Boolean));
       selectedCreateAccountIDs = new Set([...selectedCreateAccountIDs].filter(id => ids.has(id)));
@@ -794,13 +867,9 @@
         const id = session.account_id;
         const checked = selectedCreateAccountIDs.has(id) ? 'checked' : '';
         const title = createAccountDisplayName(session);
-        const status = [
-          session.apple_account_manage_ready ? '新接口可创建' : (session.can_create_hme ? '旧接口可创建' : '不可创建'),
-          session.last_check_ok ? '检测正常' : (session.last_checked_at ? '检测失败' : '未检测')
-        ].join(' / ');
         return `<label class="create-account-option">
           <span><input type="checkbox" ${checked} onchange="toggleCreateAccount(${esc(JSON.stringify(id))}, this.checked)"> ${esc(title)}</span>
-          <small>${esc(status || `账号 ${index + 1}`)}</small>
+          <small class="login-status-wrap">${sessionLoginBadges(session)}<span>${esc(sessionCheckText(session) || `账号 ${index + 1}`)}</span></small>
         </label>`;
       }).join('');
       box.innerHTML =
@@ -1116,13 +1185,12 @@
         account_ids: accountIDs,
         label: $('protoLabel').value.trim(),
         note: $('protoNote').value.trim(),
-        batch_size: boundedInt('scheduleBatchSize', 5, 1, 200),
         interval_minutes: boundedInt('scheduleIntervalMinutes', 60, 1, 1440)
       };
       const data = await api('/api/icloud/scheduler/start', {method:'POST', body: JSON.stringify(payload)});
       renderMailboxScheduler(data.scheduler || {});
       ensureSchedulerPolling();
-      log(`定时创建已启动：每 ${payload.interval_minutes} 分钟跑 ${payload.batch_size} 轮；每轮勾选账号同时创建；参与账号=${accountNames}`);
+      log(`定时创建已启动：每 ${payload.interval_minutes} 分钟开始一次；失败账号本轮临时跳过，其他账号继续创建；参与账号=${accountNames}`);
     }
 
     async function stopMailboxScheduler() {
@@ -1145,11 +1213,10 @@
       if ($('stopScheduleButton')) $('stopScheduleButton').disabled = !running;
       if ($('scheduleStatus')) {
         const interval = scheduler.interval_minutes || Math.round((scheduler.interval_seconds || 0) / 60) || 60;
-        const batchSize = scheduler.batch_size || 5;
         const next = scheduler.next_run_at ? `；下次：${scheduler.next_run_at}` : '';
         const statusText = running
-          ? `运行中：每 ${interval} 分钟创建 ${batchSize} 个；成功 ${scheduler.success || 0}，失败 ${scheduler.failed || 0}${next}`
-          : `未运行：默认每 60 分钟创建 5 个；历史成功 ${scheduler.success || 0}，失败 ${scheduler.failed || 0}`;
+          ? `运行中：每 ${interval} 分钟开始一次；已创建 ${scheduler.success || 0}，失败 ${scheduler.failed || 0}${next}`
+          : `未运行：默认每 60 分钟开始一次；历史创建 ${scheduler.success || 0}，失败 ${scheduler.failed || 0}`;
         $('scheduleStatus').textContent = scheduler.last_error ? `${statusText}；最近错误：${scheduler.last_error}` : statusText;
       }
       if ($('scheduleEvents')) {
@@ -1363,8 +1430,6 @@
       }).join('');
       const flags = [
         active.is_icloud_plus ? 'iCloud+ active' : '无 iCloud+',
-        active.can_create_hme ? '可创建隐私邮箱' : '不可创建隐私邮箱',
-        active.apple_account_manage_ready ? '新接口登录态可用' : '未保存新接口登录态',
         `Cookie ${active.cookie_count || 0}`
       ].join(' / ');
       const checkLine = active.last_checked_at
@@ -1375,6 +1440,7 @@
         `<div class="session-tabs">${tabs}</div>` +
         `<div class="session-card">Apple ID：${esc(active.apple_id || '-')}<br>` +
         `账号ID：${esc(active.account_id || '-')}，DSID=${esc(active.dsid_mask || '-')}<br>` +
+        `<div class="login-chips">${sessionLoginBadges(active)}</div>` +
         `${esc(flags)}<br>` +
         `${esc(checkLine)}<br>` +
         `状态：${esc(active.last_status_message || '-')}<br>` +
