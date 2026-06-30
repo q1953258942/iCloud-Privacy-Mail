@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -175,16 +176,14 @@ func (c *ICloudClient) CreatePrivacyMailboxWithAppleAccount(ctx context.Context,
 	if !ok {
 		return ICloudRemoteMailbox{}, session, errCode("apple_account_session_missing", "当前登录态缺少 Apple Account 管理态，请重新协议登录", true)
 	}
-	apiKey := strings.TrimSpace(firstNonEmpty(loginState.APIKey, fallbackAPIKey))
-	if apiKey == "" {
-		refreshed, err := c.RefreshAppleAccountManageState(ctx, loginState)
-		loginState = refreshed
-		session = withAppleAccountLoginState(session, loginState)
-		if err != nil {
-			return ICloudRemoteMailbox{}, session, err
-		}
-		apiKey = strings.TrimSpace(loginState.APIKey)
+	fallbackAPIKey = strings.TrimSpace(fallbackAPIKey)
+	refreshed, err := c.RefreshAppleAccountManageState(ctx, loginState)
+	loginState = refreshed
+	session = withAppleAccountLoginState(session, loginState)
+	if err != nil && (fallbackAPIKey == "" || !isCodedError(err, "apple_account_api_key_missing")) {
+		return ICloudRemoteMailbox{}, session, err
 	}
+	apiKey := strings.TrimSpace(firstNonEmpty(loginState.APIKey, fallbackAPIKey))
 	if apiKey == "" {
 		return ICloudRemoteMailbox{}, session, errCode("apple_account_api_key_missing", "Apple Account 管理态缺少 api_key，请重新完成 Apple Account 登录流程", true)
 	}
@@ -742,6 +741,11 @@ func appleAccountAPIError(status int, data []byte) error {
 		return errCode("apple_account_auth_failed", "Apple Account 管理态已失效，请重新协议登录", true)
 	}
 	return errCode("apple_account_api_failed", msg, true)
+}
+
+func isCodedError(err error, code string) bool {
+	var coded codedError
+	return errors.As(err, &coded) && coded.code == code
 }
 
 func (c *ICloudClient) call(ctx context.Context, session ICloudSession, method, path string, body any, result any) error {

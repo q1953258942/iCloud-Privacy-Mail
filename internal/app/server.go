@@ -2220,7 +2220,7 @@ func (s *Server) createICloudMailboxRemoteAppleAccount(ctx context.Context, owne
 	}
 	remote, updatedSession, err := NewICloudClient().CreatePrivacyMailboxWithAppleAccount(ctx, session, s.cfg.AppleAccountAPIKey, label, note)
 	s.markMailboxCreateFinished(key)
-	if err == nil {
+	if _, ok := appleAccountLoginState(updatedSession); ok {
 		if saveErr := s.store.SaveICloudSessionForOwner(ownerID, updatedSession); saveErr != nil {
 			s.logger.Warn("failed to save updated Apple Account login state", "account_id", session.AccountID, "err", saveErr)
 		}

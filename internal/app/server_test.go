@@ -495,11 +495,9 @@ func TestICloudClientCreatePrivacyMailboxWithAppleAccount(t *testing.T) {
 	defer func() { appleAccountManageBaseURL = oldBaseURL }()
 
 	var paths []string
+	tokenCalls := 0
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.Method+" "+r.URL.Path)
-		if r.Header.Get("X-Apple-Api-Key") != "account-key" {
-			t.Fatalf("api key header = %q, want account-key", r.Header.Get("X-Apple-Api-Key"))
-		}
 		if r.Header.Get("X-Apple-I-Request-Context") != "ca" {
 			t.Fatalf("request context = %q, want ca", r.Header.Get("X-Apple-I-Request-Context"))
 		}
@@ -508,9 +506,38 @@ func TestICloudClientCreatePrivacyMailboxWithAppleAccount(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
-		case "POST /account/manage/email/private/add":
+		case "GET /account/manage/gs/ws/token":
+			tokenCalls++
+			if tokenCalls != 1 {
+				t.Fatalf("unexpected token call %d", tokenCalls)
+			}
+			if r.Header.Get("X-Apple-Api-Key") != "" {
+				t.Fatalf("token api key header = %q, want empty", r.Header.Get("X-Apple-Api-Key"))
+			}
 			if r.Header.Get("scnt") != "scnt-token" {
-				t.Fatalf("add scnt header = %q, want scnt-token", r.Header.Get("scnt"))
+				t.Fatalf("token scnt header = %q, want scnt-token", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "scnt-after-token")
+			http.SetCookie(w, &http.Cookie{Name: "token-cookie", Value: "ok", Path: "/"})
+			_, _ = w.Write([]byte(`{"timeOutInterval":15}`))
+		case "GET /account/manage":
+			if r.Header.Get("X-Apple-Api-Key") != "" {
+				t.Fatalf("manage api key header = %q, want empty", r.Header.Get("X-Apple-Api-Key"))
+			}
+			if r.Header.Get("scnt") != "scnt-after-token" {
+				t.Fatalf("manage scnt header = %q, want scnt-after-token", r.Header.Get("scnt"))
+			}
+			if !strings.Contains(r.Header.Get("Cookie"), "token-cookie=ok") {
+				t.Fatalf("manage cookie header = %q, want token response cookie", r.Header.Get("Cookie"))
+			}
+			w.Header().Set("scnt", "scnt-after-manage")
+			_, _ = w.Write([]byte(`{"apiKey":"account-key"}`))
+		case "POST /account/manage/email/private/add":
+			if r.Header.Get("X-Apple-Api-Key") != "account-key" {
+				t.Fatalf("add api key header = %q, want account-key", r.Header.Get("X-Apple-Api-Key"))
+			}
+			if r.Header.Get("scnt") != "scnt-after-manage" {
+				t.Fatalf("add scnt header = %q, want scnt-after-manage", r.Header.Get("scnt"))
 			}
 			w.Header().Set("scnt", "scnt-after-add")
 			body, _ := io.ReadAll(r.Body)
@@ -519,6 +546,9 @@ func TestICloudClientCreatePrivacyMailboxWithAppleAccount(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"emailAddress":"Candidate.Alias@icloud.com","newToPrivateEmail":false,"exists":false,"type":"settings","active":false}`))
 		case "PUT /account/manage/email/private/add/complete":
+			if r.Header.Get("X-Apple-Api-Key") != "account-key" {
+				t.Fatalf("complete api key header = %q, want account-key", r.Header.Get("X-Apple-Api-Key"))
+			}
 			if r.Header.Get("scnt") != "scnt-after-add" {
 				t.Fatalf("complete scnt header = %q, want scnt-after-add", r.Header.Get("scnt"))
 			}
@@ -532,6 +562,9 @@ func TestICloudClientCreatePrivacyMailboxWithAppleAccount(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"emailAddress":"Candidate.Alias@icloud.com","label":"LAB","note":"note","id":"abc123","type":"settings","active":false}`))
 		case "GET /account/manage/email/private/abc123.em":
+			if r.Header.Get("X-Apple-Api-Key") != "account-key" {
+				t.Fatalf("confirm api key header = %q, want account-key", r.Header.Get("X-Apple-Api-Key"))
+			}
 			if r.Header.Get("scnt") != "scnt-after-complete" {
 				t.Fatalf("confirm scnt header = %q, want scnt-after-complete", r.Header.Get("scnt"))
 			}
@@ -549,7 +582,7 @@ func TestICloudClientCreatePrivacyMailboxWithAppleAccount(t *testing.T) {
 		LoginStates: []LoginState{{
 			Kind:   LoginStateAppleAccount,
 			Scnt:   "scnt-token",
-			APIKey: "account-key",
+			APIKey: "stale-key",
 		}},
 	}, "", "LAB", "note")
 	if err != nil {
@@ -559,6 +592,8 @@ func TestICloudClientCreatePrivacyMailboxWithAppleAccount(t *testing.T) {
 		t.Fatalf("remote = %+v", remote)
 	}
 	wantPaths := []string{
+		"GET /account/manage/gs/ws/token",
+		"GET /account/manage",
 		"POST /account/manage/email/private/add",
 		"PUT /account/manage/email/private/add/complete",
 		"GET /account/manage/email/private/abc123.em",
@@ -567,8 +602,8 @@ func TestICloudClientCreatePrivacyMailboxWithAppleAccount(t *testing.T) {
 		t.Fatalf("paths = %#v, want %#v", paths, wantPaths)
 	}
 	updatedState, ok := appleAccountLoginState(updatedSession)
-	if !ok || updatedState.Scnt != "scnt-after-confirm" {
-		t.Fatalf("updated apple account state = %+v ok=%v, want scnt-after-confirm", updatedState, ok)
+	if !ok || updatedState.Scnt != "scnt-after-confirm" || updatedState.APIKey != "account-key" {
+		t.Fatalf("updated apple account state = %+v ok=%v, want refreshed scnt/api key", updatedState, ok)
 	}
 }
 
@@ -932,21 +967,31 @@ func TestSubmitAppleAccountManage2FADefaultsTrustedDeviceAndUsesFreshScnt(t *tes
 	var submittedCode string
 	authTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authPaths = append(authPaths, r.Method+" "+r.URL.Path)
-		if r.Method != http.MethodPost || r.URL.Path != "/verify/trusteddevice/securitycode" {
+		switch r.Method + " " + r.URL.Path {
+		case "POST /verify/trusteddevice/securitycode":
+			var body struct {
+				SecurityCode struct {
+					Code string `json:"code"`
+				} `json:"securityCode"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			submittedCode = body.SecurityCode.Code
+			w.Header().Set("scnt", "fresh-scnt")
+			w.Header().Set("X-Apple-ID-Session-Id", "fresh-session")
+			w.WriteHeader(http.StatusNoContent)
+		case "GET /2sv/trust":
+			if r.Header.Get("scnt") != "fresh-scnt" {
+				t.Fatalf("trust scnt header = %q, want fresh-scnt", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "trusted-scnt")
+			w.Header().Set("X-Apple-ID-Session-Id", "trusted-session")
+			http.SetCookie(w, &http.Cookie{Name: "trust-cookie", Value: "ok", Path: "/"})
+			w.WriteHeader(http.StatusNoContent)
+		default:
 			t.Fatalf("unexpected auth request %s %s", r.Method, r.URL.Path)
 		}
-		var body struct {
-			SecurityCode struct {
-				Code string `json:"code"`
-			} `json:"securityCode"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatal(err)
-		}
-		submittedCode = body.SecurityCode.Code
-		w.Header().Set("scnt", "fresh-scnt")
-		w.Header().Set("X-Apple-ID-Session-Id", "fresh-session")
-		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer authTS.Close()
 
@@ -961,8 +1006,8 @@ func TestSubmitAppleAccountManage2FADefaultsTrustedDeviceAndUsesFreshScnt(t *tes
 			if tokenCalls != 1 {
 				t.Fatalf("unexpected token call %d", tokenCalls)
 			}
-			if r.Header.Get("scnt") != "fresh-scnt" {
-				t.Fatalf("token scnt header = %q, want fresh-scnt", r.Header.Get("scnt"))
+			if r.Header.Get("scnt") != "trusted-scnt" {
+				t.Fatalf("token scnt header = %q, want trusted-scnt", r.Header.Get("scnt"))
 			}
 			w.Header().Set("scnt", "token-scnt")
 			http.SetCookie(w, &http.Cookie{Name: "manage-token", Value: "ok", Path: "/"})
@@ -1005,8 +1050,12 @@ func TestSubmitAppleAccountManage2FADefaultsTrustedDeviceAndUsesFreshScnt(t *tes
 	if submittedCode != "123456" {
 		t.Fatalf("submitted code = %q, want 123456", submittedCode)
 	}
-	if strings.Join(authPaths, "\n") != "POST /verify/trusteddevice/securitycode" {
-		t.Fatalf("auth paths = %#v, want only trusted-device validation", authPaths)
+	wantAuthPaths := []string{
+		"POST /verify/trusteddevice/securitycode",
+		"GET /2sv/trust",
+	}
+	if strings.Join(authPaths, "\n") != strings.Join(wantAuthPaths, "\n") {
+		t.Fatalf("auth paths = %#v, want %#v", authPaths, wantAuthPaths)
 	}
 	wantManagePaths := []string{
 		"GET /account/manage/gs/ws/token",
@@ -1016,8 +1065,11 @@ func TestSubmitAppleAccountManage2FADefaultsTrustedDeviceAndUsesFreshScnt(t *tes
 		t.Fatalf("manage paths = %#v, want %#v", managePaths, wantManagePaths)
 	}
 	state, ok := appleAccountLoginState(icloudSession)
-	if !ok || state.Scnt != "manage-scnt" || state.APIKey != "account-key" || state.SessionID != "fresh-session" {
+	if !ok || state.Scnt != "manage-scnt" || state.APIKey != "account-key" || state.SessionID != "trusted-session" {
 		t.Fatalf("apple account state = %+v ok=%v, want fresh session/scnt/api key", state, ok)
+	}
+	if !strings.Contains(cookieHeader(state.Cookies, authTS.URL+"/2sv/trust"), "trust-cookie=ok") {
+		t.Fatalf("apple account state cookies = %+v, want trust cookie saved", state.Cookies)
 	}
 }
 
@@ -2820,6 +2872,99 @@ func TestMailboxSchedulerFallsBackToOldInterfaceAfterNewInterfaceFails(t *testin
 	}
 	if !sawSwitch {
 		t.Fatalf("events did not include old-interface fallback: %+v", events)
+	}
+}
+
+func TestCreateAppleAccountMailboxSavesRefreshedStateWhenCreateFails(t *testing.T) {
+	oldBaseURL := appleAccountManageBaseURL
+	defer func() { appleAccountManageBaseURL = oldBaseURL }()
+
+	store := newTestStore(t)
+	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
+	server := handler.(*Server)
+	ownerID := "owner-apple-refresh-fail"
+	if err := store.SaveICloudSessionForOwner(ownerID, ICloudSession{
+		OwnerID: ownerID,
+		AppleID: "refresh-fail@example.com",
+		LoginStates: []LoginState{{
+			Kind:      LoginStateAppleAccount,
+			Host:      "appleid.apple.com",
+			Origin:    "https://account.apple.com",
+			Scnt:      "stale-scnt",
+			SessionID: "sid",
+			APIKey:    "stale-key",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessions := store.ICloudSessionsForOwner(ownerID)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(sessions))
+	}
+	session := sessions[0]
+
+	var paths []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /account/manage/gs/ws/token":
+			if r.Header.Get("scnt") != "stale-scnt" {
+				t.Fatalf("token scnt header = %q, want stale-scnt", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "fresh-token-scnt")
+			http.SetCookie(w, &http.Cookie{Name: "token-cookie", Value: "ok", Path: "/"})
+			_, _ = w.Write([]byte(`{"timeOutInterval":15}`))
+		case "GET /account/manage":
+			if r.Header.Get("scnt") != "fresh-token-scnt" {
+				t.Fatalf("manage scnt header = %q, want fresh-token-scnt", r.Header.Get("scnt"))
+			}
+			if !strings.Contains(r.Header.Get("Cookie"), "token-cookie=ok") {
+				t.Fatalf("manage cookie header = %q, want token response cookie", r.Header.Get("Cookie"))
+			}
+			w.Header().Set("scnt", "fresh-manage-scnt")
+			http.SetCookie(w, &http.Cookie{Name: "manage-cookie", Value: "ok", Path: "/"})
+			_, _ = w.Write([]byte(`{"apiKey":"fresh-key"}`))
+		case "POST /account/manage/email/private/add":
+			if r.Header.Get("X-Apple-Api-Key") != "fresh-key" {
+				t.Fatalf("add api key header = %q, want fresh-key", r.Header.Get("X-Apple-Api-Key"))
+			}
+			if r.Header.Get("scnt") != "fresh-manage-scnt" {
+				t.Fatalf("add scnt header = %q, want fresh-manage-scnt", r.Header.Get("scnt"))
+			}
+			if !strings.Contains(r.Header.Get("Cookie"), "manage-cookie=ok") {
+				t.Fatalf("add cookie header = %q, want refreshed cookies", r.Header.Get("Cookie"))
+			}
+			w.Header().Set("scnt", "fresh-failed-scnt")
+			http.SetCookie(w, &http.Cookie{Name: "fail-cookie", Value: "ok", Path: "/"})
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`You have reached the limit of addresses you can create right now. Please try again later.`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer ts.Close()
+	appleAccountManageBaseURL = ts.URL
+
+	_, err := server.createICloudMailboxRemoteAppleAccount(context.Background(), ownerID, session, "LAB", "", ownerID+":"+session.AccountID)
+	if err == nil {
+		t.Fatal("create error = nil, want Apple Account limit error")
+	}
+	got := store.ICloudSessionsForOwner(ownerID)[0]
+	state, ok := appleAccountLoginState(got)
+	if !ok || state.Scnt != "fresh-failed-scnt" || state.APIKey != "fresh-key" {
+		t.Fatalf("saved apple account state = %+v ok=%v, want refreshed state after failed create", state, ok)
+	}
+	if cookie := cookieHeader(state.Cookies, ts.URL+"/account/manage/email/private/add"); !strings.Contains(cookie, "fail-cookie=ok") {
+		t.Fatalf("saved cookie header = %q, want failed response cookie saved", cookie)
+	}
+	wantPaths := []string{
+		"GET /account/manage/gs/ws/token",
+		"GET /account/manage",
+		"POST /account/manage/email/private/add",
+	}
+	if strings.Join(paths, "\n") != strings.Join(wantPaths, "\n") {
+		t.Fatalf("paths = %#v, want %#v", paths, wantPaths)
 	}
 }
 

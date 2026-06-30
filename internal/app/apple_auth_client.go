@@ -367,6 +367,9 @@ func (c *AppleAuthClient) SubmitAppleAccountManage2FA(ctx context.Context, pendi
 			return ICloudSession{}, err
 		}
 	}
+	if err := c.trustSession(ctx, session); err != nil && os.Getenv("IPM_DEBUG_APPLE_ACCOUNT") == "1" {
+		fmt.Fprintf(os.Stderr, "APPLE_ACCOUNT_TRUST_DEBUG status=skipped err=%s\n", err.Error())
+	}
 	return c.authWithAppleAccountManage(ctx, session)
 }
 
