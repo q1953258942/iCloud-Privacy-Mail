@@ -2307,6 +2307,59 @@ func TestMailboxSchedulerStartsCreatesAndStops(t *testing.T) {
 	}
 }
 
+func TestMailboxSchedulerSkipsFailedAccountWithinCurrentBatch(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
+	server := handler.(*Server)
+	ownerID := "owner-scheduler-skip"
+	for _, session := range []ICloudSession{
+		{OwnerID: ownerID, AppleID: "bad@example.com", DSID: "dsid-bad", IsICloudPlus: true, CanCreateHME: true, Cookies: []SessionCookie{{Name: "a", Value: "1"}}},
+		{OwnerID: ownerID, AppleID: "good@example.com", DSID: "dsid-good", IsICloudPlus: true, CanCreateHME: true, Cookies: []SessionCookie{{Name: "b", Value: "2"}}},
+	} {
+		if err := store.SaveICloudSessionForOwner(ownerID, session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sessions := store.ICloudSessionsForOwner(ownerID)
+	if len(sessions) != 2 {
+		t.Fatalf("sessions = %d, want 2", len(sessions))
+	}
+	badAccountID := sessions[0].AccountID
+	goodAccountID := sessions[1].AccountID
+	attempts := map[string]int{}
+	server.createMailboxForOwner = func(ctx context.Context, ownerID, accountID, label, note string) (Mailbox, ICloudRemoteMailbox, error) {
+		attempts[accountID]++
+		if accountID == badAccountID {
+			return Mailbox{}, ICloudRemoteMailbox{}, errCode("icloud_hme_limit", "当前小时额度已用完", true)
+		}
+		mailbox, err := store.AddMailboxForOwner(ownerID, accountID, label, fmt.Sprintf("good-%d@icloud.com", attempts[accountID]))
+		if err != nil {
+			return Mailbox{}, ICloudRemoteMailbox{}, err
+		}
+		return mailbox, ICloudRemoteMailbox{Email: mailbox.Email, Label: mailbox.Label, IsActive: true}, nil
+	}
+
+	job := &mailboxSchedulerJob{state: mailboxSchedulerState{Running: true, BatchSize: 3}}
+	server.runMailboxSchedulerBatch(context.Background(), ownerID, job, mailboxSchedulerConfig{
+		AccountIDs: []string{badAccountID, goodAccountID},
+		Label:      "SCH",
+		BatchSize:  3,
+	}, 1)
+	state, events := job.snapshot()
+	if attempts[badAccountID] != 1 {
+		t.Fatalf("bad account attempts = %d, want 1; attempts=%+v", attempts[badAccountID], attempts)
+	}
+	if attempts[goodAccountID] != 3 {
+		t.Fatalf("good account attempts = %d, want 3; attempts=%+v", attempts[goodAccountID], attempts)
+	}
+	if state.Success != 3 || state.Failed != 1 {
+		t.Fatalf("scheduler state = %+v, want success=3 failed=1", state)
+	}
+	if len(events) != 4 {
+		t.Fatalf("events = %d, want 4: %+v", len(events), events)
+	}
+}
+
 func TestSaveICloudSessionForOwnerKeepsMultipleAppleAccounts(t *testing.T) {
 	store := newTestStore(t)
 	ownerID := "owner-multi"
@@ -2500,6 +2553,44 @@ func TestCreateICloudMailboxUsesSelectedSavedSessions(t *testing.T) {
 	}
 	if createdAccounts[sessions[1].AccountID] {
 		t.Fatalf("unselected account %q was used", sessions[1].AccountID)
+	}
+}
+
+func TestCreateICloudMailboxReturnsAccountFailuresWhenAllSelectedSessionsFail(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
+	server := handler.(*Server)
+	cookie, user := registerTestUser(t, handler, "all-fail-create", "multi123")
+	for _, session := range []ICloudSession{
+		{OwnerID: user.ID, AppleID: "first@example.com", DSID: "dsid-first", IsICloudPlus: true, CanCreateHME: true, Cookies: []SessionCookie{{Name: "a", Value: "1"}}},
+		{OwnerID: user.ID, AppleID: "second@example.com", DSID: "dsid-second", IsICloudPlus: true, CanCreateHME: true, Cookies: []SessionCookie{{Name: "b", Value: "2"}}},
+	} {
+		if err := store.SaveICloudSessionForOwner(user.ID, session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server.createMailboxForOwner = func(ctx context.Context, ownerID, accountID, label, note string) (Mailbox, ICloudRemoteMailbox, error) {
+		return Mailbox{}, ICloudRemoteMailbox{}, errCode("icloud_hme_limit", "当前小时额度已用完", true)
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/icloud/mailboxes/create", strings.NewReader(`{"label":"FAIL"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusMultiStatus {
+		t.Fatalf("create = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Success  bool                   `json:"success"`
+		Created  int                    `json:"created"`
+		Failures []createMailboxFailure `json:"failures"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Success || body.Created != 0 || len(body.Failures) != 2 {
+		t.Fatalf("body = %+v, want two account failures", body)
 	}
 }
 

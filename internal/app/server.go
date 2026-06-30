@@ -705,7 +705,7 @@ func (s *Server) handleCheckICloudSession(w http.ResponseWriter, r *http.Request
 	ownerID := requestOwnerID(r, s.store)
 	sessions := s.sessionsForOwner(ownerID, payload.AccountID)
 	if len(sessions) == 0 {
-		writeError(w, http.StatusBadRequest, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先协议登录", true))
+		writeError(w, http.StatusBadRequest, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先保存旧接口登录态", true))
 		return
 	}
 
@@ -720,7 +720,7 @@ func (s *Server) handleCheckICloudSession(w http.ResponseWriter, r *http.Request
 		if err != nil {
 			failed++
 			lastErr = err
-			session.LastStatusMessage = "最近检测失败：" + formatTime(checkedAt) + "；iCloud Mail 不可用，请重新协议登录"
+			session.LastStatusMessage = "最近检测失败：" + formatTime(checkedAt) + "；iCloud Mail 不可用，请重新保存旧接口登录态"
 		} else {
 			session.LastStatusMessage = "最近检测正常：" + formatTime(checkedAt) + "；iCloud Mail 可同步"
 		}
@@ -818,7 +818,7 @@ func (s *Server) handleSubmitICloudProtocol2FA(w http.ResponseWriter, r *http.Re
 	}
 	pending, ok := s.icloudProtocolLogins.get(payload.PendingID)
 	if !ok {
-		writeError(w, http.StatusBadRequest, errCode("apple_login_pending_expired", "协议登录已过期，请重新输入账号密码发起登录", true))
+		writeError(w, http.StatusBadRequest, errCode("apple_login_pending_expired", "旧接口登录已过期，请重新输入账号密码发起登录", true))
 		return
 	}
 	session, err := NewAppleAuthClient().Submit2FA(r.Context(), pending, payload.Code)
@@ -834,7 +834,7 @@ func (s *Server) handleSubmitICloudProtocol2FA(w http.ResponseWriter, r *http.Re
 	sessions := s.publicSessionsForRequest(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":  true,
-		"message":  "Apple 协议 2FA 登录成功，登录态已保存",
+		"message":  "旧接口验证码登录成功，登录态已保存",
 		"session":  publicSessionForAppleID(sessions, session.AppleID),
 		"sessions": sessions,
 	})
@@ -896,7 +896,7 @@ func (s *Server) handleSubmitAppleAccount2FA(w http.ResponseWriter, r *http.Requ
 	}
 	pending, ok := s.appleAccountLogins.get(payload.PendingID)
 	if !ok {
-		writeError(w, http.StatusBadRequest, errCode("apple_login_pending_expired", "Apple Account 管理态登录已过期，请重新输入账号密码发起登录", true))
+		writeError(w, http.StatusBadRequest, errCode("apple_login_pending_expired", "新接口登录已过期，请重新输入账号密码发起登录", true))
 		return
 	}
 	session, err := NewAppleAuthClient().SubmitAppleAccountManage2FA(r.Context(), pending, payload.Code, payload.PhoneNumber)
@@ -912,7 +912,7 @@ func (s *Server) handleSubmitAppleAccount2FA(w http.ResponseWriter, r *http.Requ
 	sessions := s.publicSessionsForRequest(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":  true,
-		"message":  "Apple Account 管理态 2FA 登录成功，登录态已保存",
+		"message":  "新接口验证码登录成功，登录态已保存",
 		"session":  publicSessionForAppleID(sessions, session.AppleID),
 		"sessions": sessions,
 	})
@@ -936,10 +936,12 @@ func (s *Server) handleCreateICloudMailbox(w http.ResponseWriter, r *http.Reques
 	}
 	ownerID := requestOwnerID(r, s.store)
 	mailboxes, remotes, failures, err := s.createMailboxesForOwner(r.Context(), ownerID, accountIDs, payload.Label, payload.Note)
-	if err != nil && len(mailboxes) == 0 {
+	if err != nil {
 		s.logICloudCreateError(ownerID, err)
-		writeError(w, http.StatusBadGateway, err)
-		return
+		if len(mailboxes) == 0 && len(failures) == 0 {
+			writeError(w, http.StatusBadGateway, err)
+			return
+		}
 	}
 	out := make([]publicMailbox, 0, len(mailboxes))
 	for _, mailbox := range mailboxes {
@@ -991,7 +993,7 @@ func (s *Server) handleSyncICloudMailboxes(w http.ResponseWriter, r *http.Reques
 	ownerID := requestOwnerID(r, s.store)
 	sessions := s.sessionsForOwner(ownerID, payload.AccountID)
 	if len(sessions) == 0 {
-		writeError(w, http.StatusBadRequest, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先协议登录", true))
+		writeError(w, http.StatusBadRequest, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先保存旧接口登录态", true))
 		return
 	}
 
@@ -1229,7 +1231,7 @@ func (s *Server) handleCleanRemoteMailbox(w http.ResponseWriter, r *http.Request
 	}
 	session, ok := s.sessionForMailbox(mailbox.OwnerID, mailbox.AccountID)
 	if !ok {
-		writeError(w, http.StatusBadRequest, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先协议登录", true))
+		writeError(w, http.StatusBadRequest, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先保存旧接口登录态", true))
 		return
 	}
 
@@ -1735,7 +1737,7 @@ func (s *Server) syncMailbox(ctx context.Context, mailbox Mailbox, after time.Ti
 	defer s.markMailboxSyncFinished(mailbox.OwnerID)
 	session, ok := s.sessionForMailbox(mailbox.OwnerID, mailbox.AccountID)
 	if !ok {
-		return 0, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先协议登录", true)
+		return 0, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先保存旧接口登录态", true)
 	}
 	syncFn := s.syncMailboxMessages
 	if syncFn == nil {
@@ -1813,7 +1815,7 @@ func (s *Server) syncMailboxBatchForOwner(ctx context.Context, ownerID string, m
 	for _, mailbox := range refreshed {
 		session, ok := s.sessionForMailbox(ownerID, mailbox.AccountID)
 		if !ok {
-			return errCode("icloud_session_missing", "未保存 iCloud 登录态，请先协议登录", true)
+			return errCode("icloud_session_missing", "未保存 iCloud 登录态，请先保存旧接口登录态", true)
 		}
 		key := firstNonEmpty(session.AccountID, session.DSID, session.AppleID, "__legacy__")
 		group := groups[key]
@@ -1957,7 +1959,7 @@ func mailboxBatchThreadLimit(mailboxes []Mailbox) int {
 func (s *Server) createICloudMailboxForOwner(ctx context.Context, ownerID, accountID, label, note string) (Mailbox, ICloudRemoteMailbox, error) {
 	session, ok := s.sessionForOwnerAccount(ownerID, accountID)
 	if !ok {
-		return Mailbox{}, ICloudRemoteMailbox{}, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先协议登录", true)
+		return Mailbox{}, ICloudRemoteMailbox{}, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先保存登录态", true)
 	}
 	accountID = firstNonEmpty(strings.TrimSpace(accountID), session.AccountID)
 	remote, err := s.createICloudMailboxRemote(ctx, ownerID, session, label, note)
@@ -1985,7 +1987,7 @@ func (s *Server) createMailboxesForOwner(ctx context.Context, ownerID string, ac
 	accountIDs = normalizeAccountIDSelection("", accountIDs)
 	sessions := s.sessionsForOwnerAccounts(ownerID, accountIDs)
 	if len(sessions) == 0 {
-		return nil, nil, nil, errCode("icloud_session_missing", "未找到可用于创建的 iCloud 登录态，请检查参与账号 ID 或先协议登录", true)
+		return nil, nil, nil, errCode("icloud_session_missing", "未找到可用于创建的 iCloud 登录态，请检查参与账号 ID 或先保存登录态", true)
 	}
 	mailboxes := make([]Mailbox, 0, len(sessions))
 	remotes := make([]ICloudRemoteMailbox, 0, len(sessions))

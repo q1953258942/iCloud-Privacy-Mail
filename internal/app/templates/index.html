@@ -462,22 +462,23 @@
 
         <section class="view-section panel" data-view="session">
           <div class="panel-head">
-            <h2>保存登录态</h2>
-            <p>用 Apple SRP 协议登录，保存后可创建邮箱和同步邮件。</p>
+            <h2>保存 Apple 登录态</h2>
+            <p>新接口用于创建更多隐私邮箱，旧接口用于同步邮件和旧创建能力。</p>
           </div>
-          <div class="notice" id="icloudSessionInfo">未保存登录态。输入 Apple ID/密码发起协议登录，收到 2FA 后提交验证码。</div>
+          <div class="notice" id="icloudSessionInfo">未保存登录态。建议先保存新接口登录态；收到 2FA 后提交对应验证码。两种登录态会分别保存。</div>
           <div class="field-grid">
             <label>Apple ID<input id="protocolAppleId" autocomplete="username" placeholder="name@icloud.com"></label>
             <label>密码<input id="protocolPassword" type="password" autocomplete="current-password" placeholder="Apple ID 密码"></label>
             <label class="full">2FA 验证码<input id="protocol2FA" inputmode="numeric" maxlength="6" placeholder="收到后输入 6 位验证码"></label>
           </div>
           <div class="toolbar">
-            <button class="primary" onclick="startProtocolLogin()">协议登录</button>
-            <button id="protocol2FAButton" onclick="submitProtocol2FA()">提交 2FA</button>
-            <button onclick="startAppleAccountLogin()">管理态登录</button>
-            <button id="appleAccount2FAButton" onclick="submitAppleAccount2FA()">提交管理态 2FA</button>
+            <button class="primary" onclick="startAppleAccountLogin()">保存新接口登录态</button>
+            <button id="appleAccount2FAButton" onclick="submitAppleAccount2FA()">提交新接口验证码</button>
+            <button onclick="startProtocolLogin()">保存旧接口登录态</button>
+            <button id="protocol2FAButton" onclick="submitProtocol2FA()">提交旧接口验证码</button>
             <button id="sessionCheckButton" onclick="checkICloudSession()">检测登录态</button>
           </div>
+          <div class="hint">新接口每小时约可创建 20 个，旧接口每小时约可创建 5 个；两种登录态都保存后可一起创建，合计约 25 个/小时。</div>
           <div class="field-grid">
             <label>自动检测间隔（分钟）<input id="sessionCheckMinutes" type="number" min="1" max="120" value="3" onchange="saveSessionCheckSettings()" placeholder="3"></label>
             <label class="checkline"><input id="autoSessionCheck" type="checkbox" onchange="saveSessionCheckSettings()"> 开启自动检测</label>
@@ -487,26 +488,23 @@
 
         <section class="view-section panel" data-view="create">
           <div class="panel-head">
-            <h2>协议创建邮箱</h2>
+            <h2>创建隐私邮箱</h2>
             <p>优先用 Apple Account 新接口创建，达到上限后回落 iCloud 旧接口。</p>
           </div>
           <div class="field-grid">
             <label>标签<input id="protoLabel" placeholder="UPI-70-13"></label>
-            <label>总数<input id="protoCount" type="number" min="1" max="200" value="1" placeholder="总共创建多少个"></label>
-            <label>并发<input id="protoConcurrency" type="number" min="1" max="5" value="1" placeholder="建议 1-3"></label>
-            <label>创建间隔秒<input id="protoInterval" type="number" min="0" max="3600" step="0.1" value="30" placeholder="默认 30 秒"></label>
+            <label>备注<input id="protoNote" placeholder="选填"></label>
             <div class="full field-label">参与创建账号
               <div id="protoAccountSelector" class="create-account-selector muted">保存登录态后可在这里勾选参与创建的 Apple 账号。</div>
             </div>
-            <label class="full">备注<input id="protoNote" placeholder="选填"></label>
           </div>
           <div class="toolbar">
             <button id="createICloudButton" class="primary" onclick="createICloudMailbox()">开始创建</button>
-            <span id="protoBatchProgress" class="muted">单次或批量创建；同一 iCloud 账号后端会自动限速，避免触发 Apple 临时限制。</span>
+            <span id="protoBatchProgress" class="muted">每次点击会让当前勾选账号同时创建 1 轮，并记录本次成功/失败数量。</span>
           </div>
           <div class="field-grid">
-            <label>定时每轮数量<input id="scheduleBatchSize" type="number" min="1" max="200" value="5" placeholder="默认 5"></label>
-            <label>定时间隔分钟<input id="scheduleIntervalMinutes" type="number" min="1" max="1440" value="20" placeholder="默认 20"></label>
+            <label>定时每次轮数<input id="scheduleBatchSize" type="number" min="1" max="200" value="5" placeholder="默认 5"></label>
+            <label>定时间隔分钟<input id="scheduleIntervalMinutes" type="number" min="1" max="1440" value="60" placeholder="默认 60"></label>
           </div>
           <div class="toolbar">
             <button id="startScheduleButton" class="primary" onclick="startMailboxScheduler()">开始定时创建</button>
@@ -746,15 +744,6 @@
       return normalized;
     }
 
-    function boundedFloat(id, fallback, min, max) {
-      const el = $(id);
-      const parsed = Number.parseFloat(el ? el.value : '');
-      const value = Number.isFinite(parsed) ? parsed : fallback;
-      const normalized = Math.max(min, Math.min(max, value));
-      if (el) el.value = String(normalized);
-      return normalized;
-    }
-
     function selectableCreateSessions() {
       return (lastICloudSessions || []).filter(session => session && session.saved && session.account_id);
     }
@@ -796,7 +785,7 @@
       syncCreateAccountSelection(sessions);
       if (sessions.length === 0) {
         box.className = 'create-account-selector muted';
-        box.textContent = '未保存可用于创建的 Apple 登录态；请先协议登录。';
+        box.textContent = '未保存可用于创建的 Apple 登录态；请先保存新接口登录态或旧接口登录态。';
         return;
       }
       box.className = 'create-account-selector';
@@ -838,30 +827,6 @@
         ? new Set(selectableCreateSessions().map(session => session.account_id))
         : new Set();
       renderCreateAccountSelector();
-    }
-
-    function sleep(ms) {
-      return new Promise(resolve => setTimeout(resolve, ms));
-    }
-
-    function batchLabel(base, index, total) {
-      base = String(base || '').trim();
-      if (total <= 1) return base;
-      if (!base) {
-        const now = new Date();
-        const pad = (value) => String(value).padStart(2, '0');
-        base = `UPI-${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-      }
-      const width = Math.max(2, String(total).length);
-      return `${base}-${String(index).padStart(width, '0')}`;
-    }
-
-    function isICloudLimitError(err) {
-      const text = `${err && err.code ? err.code : ''} ${err && err.message ? err.message : ''}`.toLowerCase();
-      return text.includes('icloud_hme_limit') ||
-        text.includes('reached the limit of addresses') ||
-        (text.includes('limit') && text.includes('try again later')) ||
-        text.includes('创建上限');
     }
 
     function openRunConfig() {
@@ -1092,8 +1057,8 @@
         if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = `最近检测正常：${checkedAt}`;
         log(data.message || '登录态检测正常：iCloud Mail 可同步');
       } catch (err) {
-        if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = '最近检测失败；请重新协议登录。';
-        log('登录态检测失败：' + err.message + '；请重新协议登录');
+        if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = '最近检测失败；请重新保存登录态。';
+        log('登录态检测失败：' + err.message + '；请重新保存登录态');
         await refresh().catch(() => {});
       } finally {
         if (button) button.disabled = false;
@@ -1152,12 +1117,12 @@
         label: $('protoLabel').value.trim(),
         note: $('protoNote').value.trim(),
         batch_size: boundedInt('scheduleBatchSize', 5, 1, 200),
-        interval_minutes: boundedInt('scheduleIntervalMinutes', 20, 1, 1440)
+        interval_minutes: boundedInt('scheduleIntervalMinutes', 60, 1, 1440)
       };
       const data = await api('/api/icloud/scheduler/start', {method:'POST', body: JSON.stringify(payload)});
       renderMailboxScheduler(data.scheduler || {});
       ensureSchedulerPolling();
-      log(`定时创建已启动：每 ${payload.interval_minutes} 分钟创建 ${payload.batch_size} 个；参与账号=${accountNames}`);
+      log(`定时创建已启动：每 ${payload.interval_minutes} 分钟跑 ${payload.batch_size} 轮；每轮勾选账号同时创建；参与账号=${accountNames}`);
     }
 
     async function stopMailboxScheduler() {
@@ -1179,12 +1144,12 @@
       if ($('startScheduleButton')) $('startScheduleButton').disabled = running;
       if ($('stopScheduleButton')) $('stopScheduleButton').disabled = !running;
       if ($('scheduleStatus')) {
-        const interval = scheduler.interval_minutes || Math.round((scheduler.interval_seconds || 0) / 60) || 20;
+        const interval = scheduler.interval_minutes || Math.round((scheduler.interval_seconds || 0) / 60) || 60;
         const batchSize = scheduler.batch_size || 5;
         const next = scheduler.next_run_at ? `；下次：${scheduler.next_run_at}` : '';
         const statusText = running
           ? `运行中：每 ${interval} 分钟创建 ${batchSize} 个；成功 ${scheduler.success || 0}，失败 ${scheduler.failed || 0}${next}`
-          : `未运行：默认每 20 分钟创建 5 个；历史成功 ${scheduler.success || 0}，失败 ${scheduler.failed || 0}`;
+          : `未运行：默认每 60 分钟创建 5 个；历史成功 ${scheduler.success || 0}，失败 ${scheduler.failed || 0}`;
         $('scheduleStatus').textContent = scheduler.last_error ? `${statusText}；最近错误：${scheduler.last_error}` : statusText;
       }
       if ($('scheduleEvents')) {
@@ -1383,7 +1348,7 @@
       sessions = (sessions || []).filter(session => session && session.saved);
       lastICloudSessions = sessions;
       if (sessions.length === 0) {
-        $('icloudSessionInfo').textContent = '未保存登录态。请输入 Apple ID/密码发起协议登录，收到 2FA 后提交验证码。';
+        $('icloudSessionInfo').textContent = '未保存登录态。请输入 Apple ID/密码，优先保存新接口登录态；收到 2FA 后提交对应验证码。';
         renderCreateAccountSelector();
         return;
       }
@@ -1399,7 +1364,7 @@
       const flags = [
         active.is_icloud_plus ? 'iCloud+ active' : '无 iCloud+',
         active.can_create_hme ? '可创建隐私邮箱' : '不可创建隐私邮箱',
-        active.apple_account_manage_ready ? 'Apple Account 管理态可用' : '未保存管理态',
+        active.apple_account_manage_ready ? '新接口登录态可用' : '未保存新接口登录态',
         `Cookie ${active.cookie_count || 0}`
       ].join(' / ');
       const checkLine = active.last_checked_at
@@ -1486,27 +1451,27 @@
       }
       renderICloudSession(data.session);
       if (data.sessions) renderICloudSessions(data.sessions);
-      log('协议登录成功：' + (data.session.apple_id || appleId));
+      log('旧接口登录态已保存：' + (data.session.apple_id || appleId));
       await refresh();
     }
 
     async function submitProtocol2FA() {
       if (!protocolPendingID) {
-        log('没有待验证的协议登录，请先点击“协议登录”');
-        $('icloudSessionInfo').textContent = '没有待验证的协议登录，请先点击“协议登录”。';
+        log('没有待验证的旧接口登录，请先点击“保存旧接口登录态”');
+        $('icloudSessionInfo').textContent = '没有待验证的旧接口登录，请先点击“保存旧接口登录态”。';
         return;
       }
       const code = $('protocol2FA').value.trim();
       if (!/^\d{6}$/.test(code)) {
-        log('2FA 提交失败：请输入 6 位验证码');
-        $('icloudSessionInfo').textContent = '2FA 提交失败：请输入 6 位验证码。';
+        log('旧接口验证码提交失败：请输入 6 位验证码');
+        $('icloudSessionInfo').textContent = '旧接口验证码提交失败：请输入 6 位验证码。';
         return;
       }
       const button = $('protocol2FAButton');
       const pendingID = protocolPendingID;
       button.disabled = true;
-      $('icloudSessionInfo').textContent = '已提交 2FA，正在验证并保存登录态...';
-      log('已提交 2FA，正在验证并保存登录态');
+      $('icloudSessionInfo').textContent = '已提交旧接口验证码，正在验证并保存登录态...';
+      log('已提交旧接口验证码，正在验证并保存登录态');
       try {
         const data = await api('/api/icloud/protocol-login/2fa', {method:'POST', body: JSON.stringify({
           pending_id: pendingID,
@@ -1516,11 +1481,11 @@
         $('protocol2FA').value = '';
         renderICloudSession(data.session);
         if (data.sessions) renderICloudSessions(data.sessions);
-        log((data.message || 'Apple 协议 2FA 登录成功，登录态已保存') + '：' + (data.session.apple_id || '-'));
+        log((data.message || '旧接口登录态已保存') + '：' + (data.session.apple_id || '-'));
         await refresh();
       } catch (err) {
-        log('协议 2FA 提交失败：' + err.message);
-        $('icloudSessionInfo').textContent = '协议 2FA 提交失败：' + err.message;
+        log('旧接口验证码提交失败：' + err.message);
+        $('icloudSessionInfo').textContent = '旧接口验证码提交失败：' + err.message;
       } finally {
         button.disabled = false;
       }
@@ -1535,33 +1500,33 @@
       $('protocolPassword').value = '';
       if (data.needs_2fa) {
         appleAccountPendingID = data.pending_id || '';
-        log(`${data.message || '管理态需要 2FA'}：${data.apple_id || appleId}，有效期 ${data.expires_at || '-'}`);
-        $('icloudSessionInfo').textContent = `${data.message || '管理态需要 2FA'}\n账号：${data.apple_id || appleId}\n有效期：${data.expires_at || '-'}`;
+        log(`${data.message || '新接口需要 2FA'}：${data.apple_id || appleId}，有效期 ${data.expires_at || '-'}`);
+        $('icloudSessionInfo').textContent = `${data.message || '新接口需要 2FA'}\n账号：${data.apple_id || appleId}\n有效期：${data.expires_at || '-'}`;
         return;
       }
       renderICloudSession(data.session);
       if (data.sessions) renderICloudSessions(data.sessions);
-      log('Apple Account 管理态登录成功：' + (data.session.apple_id || appleId));
+      log('新接口登录态已保存：' + (data.session.apple_id || appleId));
       await refresh();
     }
 
     async function submitAppleAccount2FA() {
       if (!appleAccountPendingID) {
-        log('没有待验证的 Apple Account 管理态登录，请先点击“管理态登录”');
-        $('icloudSessionInfo').textContent = '没有待验证的 Apple Account 管理态登录，请先点击“管理态登录”。';
+        log('没有待验证的新接口登录，请先点击“保存新接口登录态”');
+        $('icloudSessionInfo').textContent = '没有待验证的新接口登录，请先点击“保存新接口登录态”。';
         return;
       }
       const code = $('protocol2FA').value.trim();
       if (!/^\d{6}$/.test(code)) {
-        log('管理态 2FA 提交失败：请输入 6 位验证码');
-        $('icloudSessionInfo').textContent = '管理态 2FA 提交失败：请输入 6 位验证码。';
+        log('新接口验证码提交失败：请输入 6 位验证码');
+        $('icloudSessionInfo').textContent = '新接口验证码提交失败：请输入 6 位验证码。';
         return;
       }
       const button = $('appleAccount2FAButton');
       const pendingID = appleAccountPendingID;
       button.disabled = true;
-      $('icloudSessionInfo').textContent = '已提交 Apple Account 管理态 2FA，正在验证并保存登录态...';
-      log('已提交 Apple Account 管理态 2FA，正在验证并保存登录态');
+      $('icloudSessionInfo').textContent = '已提交新接口验证码，正在验证并保存登录态...';
+      log('已提交新接口验证码，正在验证并保存登录态');
       try {
         const data = await api('/api/apple-account/login/2fa', {method:'POST', body: JSON.stringify({
           pending_id: pendingID,
@@ -1571,11 +1536,11 @@
         $('protocol2FA').value = '';
         renderICloudSession(data.session);
         if (data.sessions) renderICloudSessions(data.sessions);
-        log((data.message || 'Apple Account 管理态 2FA 登录成功，登录态已保存') + '：' + (data.session.apple_id || '-'));
+        log((data.message || '新接口登录态已保存') + '：' + (data.session.apple_id || '-'));
         await refresh();
       } catch (err) {
-        log('Apple Account 管理态 2FA 提交失败：' + err.message);
-        $('icloudSessionInfo').textContent = 'Apple Account 管理态 2FA 提交失败：' + err.message;
+        log('新接口验证码提交失败：' + err.message);
+        $('icloudSessionInfo').textContent = '新接口验证码提交失败：' + err.message;
       } finally {
         button.disabled = false;
       }
@@ -1591,97 +1556,34 @@
         accountNames = selectedCreateAccountNames();
       } catch (err) {
         progress.textContent = err.message;
-        log('协议创建邮箱未启动：' + err.message);
+        log('创建邮箱未启动：' + err.message);
         return;
       }
       const baseLabel = $('protoLabel').value.trim();
       const note = $('protoNote').value.trim();
-      const count = boundedInt('protoCount', 1, 1, 200);
-      const concurrency = Math.min(boundedInt('protoConcurrency', 1, 1, 5), count);
-      const intervalSeconds = boundedFloat('protoInterval', 30, 0, 3600);
-      const intervalMs = Math.round(intervalSeconds * 1000);
-      $('protoConcurrency').value = String(concurrency);
-
-      let nextIndex = 1;
-      let success = 0;
-      let failed = 0;
-      let lastMailbox = null;
-      let stopReason = '';
-      let nextCreateAt = 0;
-      let createSlot = Promise.resolve();
 
       button.disabled = true;
-      progress.textContent = `创建中：0/${count}，并发 ${concurrency}，间隔 ${intervalSeconds}s`;
-      log(`开始协议创建邮箱：总数=${count}，并发=${concurrency}，创建间隔=${intervalSeconds}s，参与账号=${accountNames}`);
-
-      async function waitCreateSlot(index) {
-        const previous = createSlot;
-        let release;
-        createSlot = new Promise(resolve => { release = resolve; });
-        await previous;
-        try {
-          const now = Date.now();
-          const waitMs = Math.max(0, nextCreateAt - now);
-          if (waitMs > 0) {
-            const seconds = Math.ceil(waitMs / 1000);
-            progress.textContent = `等待创建间隔：第 ${index}/${count} 个，约 ${seconds}s 后继续`;
-            log(`创建间隔等待：第 ${index}/${count} 个，${seconds}s`);
-            await sleep(waitMs);
-          }
-          nextCreateAt = Date.now() + intervalMs;
-        } finally {
-          release();
-        }
-      }
-
-      async function createOne(index) {
-        await waitCreateSlot(index);
-        if (stopReason) return null;
+      progress.textContent = `创建中：参与账号=${accountNames}`;
+      log(`开始创建隐私邮箱：参与账号=${accountNames}`);
+      try {
         const data = await api('/api/icloud/mailboxes/create', {method:'POST', body: JSON.stringify({
           account_id: accountIDs.length === 1 ? accountIDs[0] : '',
           account_ids: accountIDs,
-          label: batchLabel(baseLabel, index, count),
+          label: baseLabel,
           note
         })});
-        return data.mailboxes && data.mailboxes.length ? data.mailboxes : (data.mailbox && data.mailbox.id ? [data.mailbox] : []);
-      }
-
-      async function worker(workerNo) {
-        while (nextIndex <= count) {
-          if (stopReason) break;
-          const index = nextIndex++;
-          try {
-            const mailboxes = await createOne(index);
-            if (!mailboxes || mailboxes.length === 0) break;
-            lastMailbox = mailboxes[mailboxes.length - 1];
-            success += mailboxes.length;
-            mailboxes.forEach(mailbox => log(`创建成功 ${index}/${count}：${mailbox.email}（${mailbox.account_label || mailbox.account_apple_id || mailbox.account_id || '未绑定账号'}）`));
-          } catch (err) {
-            failed++;
-            if (isICloudLimitError(err)) {
-              stopReason = 'iCloud 已达到当前隐私邮箱创建上限，已停止继续创建；请稍后再继续或更换 iCloud 账号。';
-              log(`创建暂停 ${index}/${count}：${stopReason}`);
-            } else {
-              log(`创建失败 ${index}/${count}：${err.message}`);
-            }
-          }
-          const done = success + failed;
-          progress.textContent = stopReason
-            ? `已暂停：成功 ${success}/${count}，失败 ${failed}，剩余 ${Math.max(count - done, 0)}`
-            : `创建中：${done}/${count}，成功 ${success}，失败 ${failed}，间隔 ${intervalSeconds}s，worker ${workerNo}`;
+        const mailboxes = data.mailboxes && data.mailboxes.length ? data.mailboxes : (data.mailbox && data.mailbox.id ? [data.mailbox] : []);
+        const failures = data.failures || [];
+        if (mailboxes.length > 0) {
+          $('msgMailboxId').value = mailboxes[mailboxes.length - 1].id;
         }
-      }
-
-      try {
-        await Promise.all(Array.from({length: concurrency}, (_, index) => worker(index + 1)));
-        if (lastMailbox) $('msgMailboxId').value = lastMailbox.id;
-        if (stopReason) {
-          progress.textContent = `已暂停：成功 ${success}/${count}，失败 ${failed}，原因：iCloud 创建上限`;
-          log(`批量创建暂停：成功 ${success}/${count}，失败 ${failed}；${stopReason}`);
-        } else {
-          progress.textContent = `创建完成：成功 ${success}/${count}，失败 ${failed}`;
-          log(`批量创建完成：成功 ${success}/${count}，失败 ${failed}`);
-        }
+        mailboxes.forEach(mailbox => log(`创建成功：${mailbox.email}（${mailbox.account_label || mailbox.account_apple_id || mailbox.account_id || '未绑定账号'}）`));
+        failures.forEach(failure => log(`账号创建失败：${failure.apple_id || failure.account_id || '-'}，${failure.error || '未知错误'}；本次只记录该账号失败，其他账号已继续`));
+        progress.textContent = `本次创建完成：成功 ${mailboxes.length}，失败 ${failures.length}`;
+        log(`本次创建完成：成功 ${mailboxes.length}，失败 ${failures.length}`);
+      } catch (err) {
+        progress.textContent = `本次创建失败：${err.message}`;
+        log('本次创建失败：' + err.message);
       } finally {
         button.disabled = false;
         await refresh();
@@ -1712,7 +1614,7 @@
         log(`同步完成：${row ? row.email : id}，新增 ${data.synced || 0} 封验证码邮件，本地已有 ${(messages.messages || []).length} 封`);
         await refresh();
       } catch (err) {
-        log('同步失败：' + err.message + '；通常是 iCloud 登录态过期或 Apple 接口拒绝，请重新协议登录');
+        log('同步失败：' + err.message + '；通常是 iCloud 登录态过期或 Apple 接口拒绝，请重新保存登录态');
       }
     }
 

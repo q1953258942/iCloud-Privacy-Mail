@@ -12,7 +12,7 @@ import (
 
 const (
 	defaultMailboxSchedulerBatchSize = 5
-	defaultMailboxSchedulerInterval  = 20 * time.Minute
+	defaultMailboxSchedulerInterval  = 60 * time.Minute
 	maxMailboxSchedulerBatchSize     = 200
 	maxMailboxSchedulerEvents        = 200
 )
@@ -134,7 +134,7 @@ func (s *Server) handleStartMailboxScheduler(w http.ResponseWriter, r *http.Requ
 		}
 	}
 	if len(s.sessionsForOwnerAccounts(ownerID, accountIDs)) == 0 {
-		writeError(w, http.StatusBadRequest, errCode("icloud_session_missing", "未找到可用于创建的 iCloud 登录态，请检查参与账号 ID 或先协议登录", true))
+		writeError(w, http.StatusBadRequest, errCode("icloud_session_missing", "未找到可用于创建的 iCloud 登录态，请检查参与账号 ID 或先保存登录态", true))
 		return
 	}
 
@@ -240,7 +240,7 @@ func (s *Server) runMailboxScheduler(ctx context.Context, ownerID string, job *m
 		job.state.Status = "creating"
 		job.state.LastRunAt = time.Now()
 		job.state.NextRunAt = time.Time{}
-		job.addEventLocked("batch_started", fmt.Sprintf("开始第 %d 轮创建：本轮最多 %d 个", batch, cfg.BatchSize), batch, Mailbox{}, nil)
+		job.addEventLocked("batch_started", fmt.Sprintf("开始第 %d 次定时创建：本次最多 %d 轮，每轮勾选账号同时创建", batch, cfg.BatchSize), batch, Mailbox{}, nil)
 		job.mu.Unlock()
 
 		s.runMailboxSchedulerBatch(ctx, ownerID, job, cfg, batch)
@@ -266,13 +266,29 @@ func (s *Server) runMailboxScheduler(ctx context.Context, ownerID string, job *m
 }
 
 func (s *Server) runMailboxSchedulerBatch(ctx context.Context, ownerID string, job *mailboxSchedulerJob, cfg mailboxSchedulerConfig, batch int) {
+	batchAccountIDs := normalizeAccountIDSelection("", cfg.AccountIDs)
+	if len(batchAccountIDs) == 0 {
+		for _, session := range s.sessionsForOwnerAccounts(ownerID, cfg.AccountIDs) {
+			if accountID := strings.TrimSpace(session.AccountID); accountID != "" {
+				batchAccountIDs = append(batchAccountIDs, accountID)
+			}
+		}
+	}
+	skippedThisBatch := make(map[string]bool)
 	for index := 1; index <= cfg.BatchSize; index++ {
 		if ctx.Err() != nil {
 			return
 		}
+		activeAccountIDs := activeSchedulerAccountIDs(batchAccountIDs, skippedThisBatch)
+		if len(activeAccountIDs) == 0 {
+			job.mu.Lock()
+			job.addEventLocked("skipped", fmt.Sprintf("第 %d 次定时创建剩余账号都已临时跳过，下一次定时创建会重新尝试", batch), batch, Mailbox{}, nil)
+			job.mu.Unlock()
+			return
+		}
 		label := schedulerMailboxLabel(cfg.Label, batch, index, cfg.BatchSize)
-		mailboxes, _, failures, err := s.createMailboxesForOwner(ctx, ownerID, cfg.AccountIDs, label, cfg.Note)
-		if err != nil && len(mailboxes) == 0 {
+		mailboxes, _, failures, err := s.createMailboxesForOwner(ctx, ownerID, activeAccountIDs, label, cfg.Note)
+		if err != nil && len(mailboxes) == 0 && len(failures) == 0 {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return
 			}
@@ -289,20 +305,31 @@ func (s *Server) runMailboxSchedulerBatch(ctx context.Context, ownerID string, j
 		job.state.Success += len(mailboxes)
 		job.state.LastError = ""
 		for _, mailbox := range mailboxes {
-			job.addEventLocked("created", fmt.Sprintf("创建成功 %d/%d：%s", index, cfg.BatchSize, mailbox.Email), batch, mailbox, nil)
+			job.addEventLocked("created", fmt.Sprintf("第 %d/%d 轮创建成功：%s", index, cfg.BatchSize, mailbox.Email), batch, mailbox, nil)
 		}
 		if len(failures) > 0 {
 			job.state.Failed += len(failures)
 			job.state.LastError = failures[0].Error
 			for _, failure := range failures {
-				job.addEventLocked("failed", fmt.Sprintf("创建失败 %d/%d：%s", index, cfg.BatchSize, failure.Error), batch, Mailbox{}, errors.New(failure.Error))
+				if accountID := strings.TrimSpace(failure.AccountID); accountID != "" {
+					skippedThisBatch[accountID] = true
+				}
+				job.addEventLocked("failed", fmt.Sprintf("第 %d/%d 轮账号创建失败：%s，本次定时创建临时跳过该账号，下一次定时创建再试", index, cfg.BatchSize, failure.Error), batch, Mailbox{}, errors.New(failure.Error))
 			}
 		}
 		job.mu.Unlock()
-		if len(failures) > 0 {
-			return
-		}
 	}
+}
+
+func activeSchedulerAccountIDs(accountIDs []string, skipped map[string]bool) []string {
+	out := make([]string, 0, len(accountIDs))
+	for _, accountID := range normalizeAccountIDSelection("", accountIDs) {
+		if skipped[strings.TrimSpace(accountID)] {
+			continue
+		}
+		out = append(out, accountID)
+	}
+	return out
 }
 
 func (s *Server) mailboxScheduler(ownerID string) *mailboxSchedulerJob {
