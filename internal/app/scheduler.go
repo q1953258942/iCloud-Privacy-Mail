@@ -17,12 +17,15 @@ const (
 	maxMailboxSchedulerEvents        = 200
 )
 
+var defaultMailboxSchedulerRoundInterval = 5 * time.Second
+
 type mailboxSchedulerConfig struct {
-	AccountIDs []string
-	Label      string
-	Note       string
-	BatchSize  int
-	Interval   time.Duration
+	AccountIDs    []string
+	Label         string
+	Note          string
+	BatchSize     int
+	Interval      time.Duration
+	RoundInterval time.Duration
 }
 
 type mailboxSchedulerJob struct {
@@ -34,24 +37,25 @@ type mailboxSchedulerJob struct {
 }
 
 type mailboxSchedulerState struct {
-	Running         bool
-	OwnerID         string
-	Owner           string
-	AccountID       string
-	AccountIDs      []string
-	Label           string
-	Note            string
-	BatchSize       int
-	IntervalSeconds int
-	Status          string
-	BatchIndex      int
-	Success         int
-	Failed          int
-	StartedAt       time.Time
-	LastRunAt       time.Time
-	NextRunAt       time.Time
-	StoppedAt       time.Time
-	LastError       string
+	Running              bool
+	OwnerID              string
+	Owner                string
+	AccountID            string
+	AccountIDs           []string
+	Label                string
+	Note                 string
+	BatchSize            int
+	IntervalSeconds      int
+	RoundIntervalSeconds int
+	Status               string
+	BatchIndex           int
+	Success              int
+	Failed               int
+	StartedAt            time.Time
+	LastRunAt            time.Time
+	NextRunAt            time.Time
+	StoppedAt            time.Time
+	LastError            string
 }
 
 type mailboxSchedulerEvent struct {
@@ -66,25 +70,26 @@ type mailboxSchedulerEvent struct {
 }
 
 type publicMailboxScheduler struct {
-	Running         bool                          `json:"running"`
-	Owner           string                        `json:"owner,omitempty"`
-	AccountID       string                        `json:"account_id,omitempty"`
-	AccountIDs      []string                      `json:"account_ids,omitempty"`
-	Label           string                        `json:"label,omitempty"`
-	Note            string                        `json:"note,omitempty"`
-	BatchSize       int                           `json:"batch_size"`
-	IntervalSeconds int                           `json:"interval_seconds"`
-	IntervalMinutes int                           `json:"interval_minutes"`
-	Status          string                        `json:"status"`
-	BatchIndex      int                           `json:"batch_index"`
-	Success         int                           `json:"success"`
-	Failed          int                           `json:"failed"`
-	StartedAt       string                        `json:"started_at,omitempty"`
-	LastRunAt       string                        `json:"last_run_at,omitempty"`
-	NextRunAt       string                        `json:"next_run_at,omitempty"`
-	StoppedAt       string                        `json:"stopped_at,omitempty"`
-	LastError       string                        `json:"last_error,omitempty"`
-	Events          []publicMailboxSchedulerEvent `json:"events"`
+	Running              bool                          `json:"running"`
+	Owner                string                        `json:"owner,omitempty"`
+	AccountID            string                        `json:"account_id,omitempty"`
+	AccountIDs           []string                      `json:"account_ids,omitempty"`
+	Label                string                        `json:"label,omitempty"`
+	Note                 string                        `json:"note,omitempty"`
+	BatchSize            int                           `json:"batch_size"`
+	IntervalSeconds      int                           `json:"interval_seconds"`
+	IntervalMinutes      int                           `json:"interval_minutes"`
+	RoundIntervalSeconds int                           `json:"round_interval_seconds"`
+	Status               string                        `json:"status"`
+	BatchIndex           int                           `json:"batch_index"`
+	Success              int                           `json:"success"`
+	Failed               int                           `json:"failed"`
+	StartedAt            string                        `json:"started_at,omitempty"`
+	LastRunAt            string                        `json:"last_run_at,omitempty"`
+	NextRunAt            string                        `json:"next_run_at,omitempty"`
+	StoppedAt            string                        `json:"stopped_at,omitempty"`
+	LastError            string                        `json:"last_error,omitempty"`
+	Events               []publicMailboxSchedulerEvent `json:"events"`
 }
 
 type publicMailboxSchedulerEvent struct {
@@ -108,13 +113,14 @@ func (s *Server) handleMailboxSchedulerStatus(w http.ResponseWriter, r *http.Req
 
 func (s *Server) handleStartMailboxScheduler(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
-		AccountID       string   `json:"account_id"`
-		AccountIDs      []string `json:"account_ids"`
-		Label           string   `json:"label"`
-		Note            string   `json:"note"`
-		BatchSize       int      `json:"batch_size"`
-		IntervalMinutes int      `json:"interval_minutes"`
-		IntervalSeconds int      `json:"interval_seconds"`
+		AccountID            string   `json:"account_id"`
+		AccountIDs           []string `json:"account_ids"`
+		Label                string   `json:"label"`
+		Note                 string   `json:"note"`
+		BatchSize            int      `json:"batch_size"`
+		IntervalMinutes      int      `json:"interval_minutes"`
+		IntervalSeconds      int      `json:"interval_seconds"`
+		RoundIntervalSeconds int      `json:"round_interval_seconds"`
 	}
 	if err := decodeJSON(r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -139,11 +145,12 @@ func (s *Server) handleStartMailboxScheduler(w http.ResponseWriter, r *http.Requ
 	}
 
 	cfg := mailboxSchedulerConfig{
-		AccountIDs: accountIDs,
-		Label:      strings.TrimSpace(payload.Label),
-		Note:       strings.TrimSpace(payload.Note),
-		BatchSize:  defaultMailboxSchedulerBatchSize,
-		Interval:   defaultMailboxSchedulerInterval,
+		AccountIDs:    accountIDs,
+		Label:         strings.TrimSpace(payload.Label),
+		Note:          strings.TrimSpace(payload.Note),
+		BatchSize:     defaultMailboxSchedulerBatchSize,
+		Interval:      defaultMailboxSchedulerInterval,
+		RoundInterval: defaultMailboxSchedulerRoundInterval,
 	}
 	if payload.IntervalSeconds > 0 {
 		cfg.Interval = time.Duration(payload.IntervalSeconds) * time.Second
@@ -153,22 +160,29 @@ func (s *Server) handleStartMailboxScheduler(w http.ResponseWriter, r *http.Requ
 	if cfg.Interval < time.Second {
 		cfg.Interval = time.Second
 	}
+	if payload.RoundIntervalSeconds > 0 {
+		cfg.RoundInterval = time.Duration(payload.RoundIntervalSeconds) * time.Second
+		if cfg.RoundInterval < time.Second {
+			cfg.RoundInterval = time.Second
+		}
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	job := &mailboxSchedulerJob{
 		cancel: cancel,
 		state: mailboxSchedulerState{
-			Running:         true,
-			OwnerID:         ownerID,
-			Owner:           s.ownerName(ownerID),
-			AccountID:       strings.Join(cfg.AccountIDs, ","),
-			AccountIDs:      append([]string(nil), cfg.AccountIDs...),
-			Label:           cfg.Label,
-			Note:            cfg.Note,
-			BatchSize:       cfg.BatchSize,
-			IntervalSeconds: int(cfg.Interval.Round(time.Second).Seconds()),
-			Status:          "running",
-			StartedAt:       time.Now(),
+			Running:              true,
+			OwnerID:              ownerID,
+			Owner:                s.ownerName(ownerID),
+			AccountID:            strings.Join(cfg.AccountIDs, ","),
+			AccountIDs:           append([]string(nil), cfg.AccountIDs...),
+			Label:                cfg.Label,
+			Note:                 cfg.Note,
+			BatchSize:            cfg.BatchSize,
+			IntervalSeconds:      int(cfg.Interval.Round(time.Second).Seconds()),
+			RoundIntervalSeconds: int(cfg.RoundInterval.Round(time.Second).Seconds()),
+			Status:               "running",
+			StartedAt:            time.Now(),
 		},
 	}
 	job.addEventLocked("started", "定时创建已启动", 0, Mailbox{}, nil)
@@ -360,7 +374,27 @@ func (s *Server) runMailboxSchedulerBatch(ctx context.Context, ownerID string, j
 				job.addEventLocked("failed", schedulerAccountFailedMessage(index, accountLabel, channel, failure.Error), batch, Mailbox{}, errors.New(failure.Error))
 			}
 		}
+		hasNextRound := len(activeSchedulerCreateRequests(batchAccountIDs, accountChannels, disabledChannels, skippedThisBatch)) > 0
 		job.mu.Unlock()
+		if hasNextRound {
+			if err := waitMailboxSchedulerRoundInterval(ctx, cfg.RoundInterval); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func waitMailboxSchedulerRoundInterval(ctx context.Context, interval time.Duration) error {
+	if interval <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -513,34 +547,36 @@ func (s *Server) publicMailboxScheduler(r *http.Request) publicMailboxScheduler 
 	job := s.mailboxScheduler(ownerID)
 	if job == nil {
 		return publicMailboxScheduler{
-			BatchSize:       defaultMailboxSchedulerBatchSize,
-			IntervalSeconds: int(defaultMailboxSchedulerInterval.Seconds()),
-			IntervalMinutes: int(defaultMailboxSchedulerInterval.Minutes()),
-			Status:          "stopped",
-			Events:          []publicMailboxSchedulerEvent{},
+			BatchSize:            defaultMailboxSchedulerBatchSize,
+			IntervalSeconds:      int(defaultMailboxSchedulerInterval.Seconds()),
+			IntervalMinutes:      int(defaultMailboxSchedulerInterval.Minutes()),
+			RoundIntervalSeconds: int(defaultMailboxSchedulerRoundInterval.Seconds()),
+			Status:               "stopped",
+			Events:               []publicMailboxSchedulerEvent{},
 		}
 	}
 	state, events := job.snapshot()
 	out := publicMailboxScheduler{
-		Running:         state.Running,
-		Owner:           state.Owner,
-		AccountID:       state.AccountID,
-		AccountIDs:      append([]string(nil), state.AccountIDs...),
-		Label:           state.Label,
-		Note:            state.Note,
-		BatchSize:       state.BatchSize,
-		IntervalSeconds: state.IntervalSeconds,
-		IntervalMinutes: state.IntervalSeconds / 60,
-		Status:          state.Status,
-		BatchIndex:      state.BatchIndex,
-		Success:         state.Success,
-		Failed:          state.Failed,
-		StartedAt:       formatTime(state.StartedAt),
-		LastRunAt:       formatTime(state.LastRunAt),
-		NextRunAt:       formatTime(state.NextRunAt),
-		StoppedAt:       formatTime(state.StoppedAt),
-		LastError:       state.LastError,
-		Events:          make([]publicMailboxSchedulerEvent, 0, len(events)),
+		Running:              state.Running,
+		Owner:                state.Owner,
+		AccountID:            state.AccountID,
+		AccountIDs:           append([]string(nil), state.AccountIDs...),
+		Label:                state.Label,
+		Note:                 state.Note,
+		BatchSize:            state.BatchSize,
+		IntervalSeconds:      state.IntervalSeconds,
+		IntervalMinutes:      state.IntervalSeconds / 60,
+		RoundIntervalSeconds: state.RoundIntervalSeconds,
+		Status:               state.Status,
+		BatchIndex:           state.BatchIndex,
+		Success:              state.Success,
+		Failed:               state.Failed,
+		StartedAt:            formatTime(state.StartedAt),
+		LastRunAt:            formatTime(state.LastRunAt),
+		NextRunAt:            formatTime(state.NextRunAt),
+		StoppedAt:            formatTime(state.StoppedAt),
+		LastError:            state.LastError,
+		Events:               make([]publicMailboxSchedulerEvent, 0, len(events)),
 	}
 	for _, event := range events {
 		item := publicMailboxSchedulerEvent{

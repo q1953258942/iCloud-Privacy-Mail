@@ -130,19 +130,24 @@ func appleAccountManageReady(session ICloudSession) bool {
 }
 
 func appleAccountManageNeedsCreateRefresh(loginState LoginState, now time.Time) bool {
+	return !appleAccountManageRecentStateUsable(loginState, now)
+}
+
+func appleAccountManageRecentStateUsable(loginState LoginState, now time.Time) bool {
 	if strings.TrimSpace(loginState.Scnt) == "" {
-		return true
+		return false
 	}
 	if strings.TrimSpace(loginState.APIKey) == "" {
-		return true
-	}
-	if !loginState.LastCheckOK {
-		return true
+		return false
 	}
 	if loginState.LastCheckedAt.IsZero() {
-		return true
+		return false
 	}
-	return now.Sub(loginState.LastCheckedAt) >= appleAccountManageCreateRefreshCooldown
+	return now.Sub(loginState.LastCheckedAt) < appleAccountManageCreateRefreshCooldown
+}
+
+func appleAccountManageRecentlyOK(loginState LoginState, now time.Time) bool {
+	return loginState.LastCheckOK && appleAccountManageRecentStateUsable(loginState, now)
 }
 
 func markAppleAccountManageOK(loginState *LoginState) {
@@ -158,6 +163,9 @@ func (c *ICloudClient) CheckAppleAccountManageSession(ctx context.Context, sessi
 	loginState, ok := appleAccountLoginState(session)
 	if !ok {
 		return session, errCode("apple_account_session_missing", "未保存新接口登录态，请先完成新接口登录", true)
+	}
+	if appleAccountManageRecentlyOK(loginState, time.Now()) {
+		return withAppleAccountLoginState(session, loginState), nil
 	}
 	refreshed, err := c.RefreshAppleAccountManageState(ctx, loginState)
 	if err != nil {
@@ -255,11 +263,12 @@ func (c *ICloudClient) createPrivacyMailboxWithAppleAccountState(ctx context.Con
 	var generated struct {
 		EmailAddress string `json:"emailAddress"`
 	}
-	if err := c.callAppleAccount(ctx, &loginState, apiKey, http.MethodPost, "/account/manage/email/private/add", map[string]any{}, &generated); err != nil {
+	generatedRaw, err := c.callAppleAccountRaw(ctx, &loginState, apiKey, http.MethodPost, "/account/manage/email/private/add", map[string]any{}, &generated)
+	if err != nil {
 		return ICloudRemoteMailbox{}, withAppleAccountLoginState(session, loginState), err
 	}
 	if strings.TrimSpace(generated.EmailAddress) == "" {
-		return ICloudRemoteMailbox{}, withAppleAccountLoginState(session, loginState), errCode("apple_account_generate_empty", "Apple Account 未返回候选隐私邮箱", true)
+		return ICloudRemoteMailbox{}, withAppleAccountLoginState(session, loginState), errCode("apple_account_generate_empty", "Apple Account 未返回候选隐私邮箱；"+appleAccountResponseDetail("生成候选隐私邮箱", generatedRaw), true)
 	}
 
 	var completed struct {
@@ -269,11 +278,12 @@ func (c *ICloudClient) createPrivacyMailboxWithAppleAccountState(ctx context.Con
 		ID           string `json:"id"`
 		Active       bool   `json:"active"`
 	}
-	if err := c.callAppleAccount(ctx, &loginState, apiKey, http.MethodPut, "/account/manage/email/private/add/complete", map[string]string{
+	completedRaw, err := c.callAppleAccountRaw(ctx, &loginState, apiKey, http.MethodPut, "/account/manage/email/private/add/complete", map[string]string{
 		"emailAddress": generated.EmailAddress,
 		"label":        label,
 		"note":         note,
-	}, &completed); err != nil {
+	}, &completed)
+	if err != nil {
 		return ICloudRemoteMailbox{}, withAppleAccountLoginState(session, loginState), err
 	}
 
@@ -304,7 +314,7 @@ func (c *ICloudClient) createPrivacyMailboxWithAppleAccountState(ctx context.Con
 		}
 	}
 	if remote.Email == "" {
-		return ICloudRemoteMailbox{}, session, errCode("apple_account_create_empty", "Apple Account 创建后未返回隐私邮箱", true)
+		return ICloudRemoteMailbox{}, session, errCode("apple_account_create_empty", "Apple Account 创建后未返回隐私邮箱；"+appleAccountResponseDetail("确认创建隐私邮箱", completedRaw), true)
 	}
 	markAppleAccountManageOK(&loginState)
 	session = withAppleAccountLoginState(session, loginState)
@@ -432,7 +442,7 @@ func (c *ICloudClient) callAppleAccountPortal(ctx context.Context, loginState *L
 		)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return appleAccountAPIError(resp.StatusCode, data)
+		return appleAccountAPIError(resp.StatusCode, data, appleAccountRequestStage(http.MethodGet, path))
 	}
 	return nil
 }
@@ -518,12 +528,17 @@ func (c *ICloudClient) reserve(ctx context.Context, session ICloudSession, hme, 
 }
 
 func (c *ICloudClient) callAppleAccount(ctx context.Context, loginState *LoginState, apiKey, method, path string, body any, result any) error {
+	_, err := c.callAppleAccountRaw(ctx, loginState, apiKey, method, path, body, result)
+	return err
+}
+
+func (c *ICloudClient) callAppleAccountRaw(ctx context.Context, loginState *LoginState, apiKey, method, path string, body any, result any) ([]byte, error) {
 	if loginState == nil {
-		return errCode("apple_account_session_missing", "当前登录态缺少 Apple Account 管理态，请重新协议登录", true)
+		return nil, errCode("apple_account_session_missing", "当前登录态缺少 Apple Account 管理态，请重新协议登录", true)
 	}
 	base, err := url.Parse(strings.TrimRight(appleAccountManageBaseForState(*loginState), "/") + "/")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	rel := &url.URL{Path: strings.TrimLeft(path, "/")}
 	rawURL := base.ResolveReference(rel).String()
@@ -532,13 +547,13 @@ func (c *ICloudClient) callAppleAccount(ctx context.Context, loginState *LoginSt
 	if body != nil {
 		data, err := json.Marshal(body)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		reader = bytes.NewReader(data)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, rawURL, reader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json")
@@ -569,12 +584,12 @@ func (c *ICloudClient) callAppleAccount(ctx context.Context, loginState *LoginSt
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	mergeSessionCookies(&loginState.Cookies, resp.Request.URL, resp.Cookies())
 	updateAppleAccountLoginStateFromHeaders(loginState, resp.Header)
@@ -595,14 +610,14 @@ func (c *ICloudClient) callAppleAccount(ctx context.Context, loginState *LoginSt
 		if os.Getenv("IPM_DEBUG_APPLE_ACCOUNT") == "1" {
 			fmt.Fprintf(os.Stderr, "APPLE_ACCOUNT_DEBUG method=%s path=%s status=%d body=%q\n", method, path, resp.StatusCode, appleDebugBody(data))
 		}
-		return appleAccountAPIError(resp.StatusCode, data)
+		return data, appleAccountAPIError(resp.StatusCode, data, appleAccountRequestStage(method, path))
 	}
 	if result != nil && len(bytes.TrimSpace(data)) > 0 {
 		if err := json.Unmarshal(data, result); err != nil {
-			return errCode("apple_account_bad_response", "Apple Account 返回无法解析", true)
+			return data, errCode("apple_account_bad_response", "Apple Account 返回无法解析；"+appleAccountResponseDetail(appleAccountRequestStage(method, path), data), true)
 		}
 	}
-	return nil
+	return data, nil
 }
 
 func updateAppleAccountLoginStateFromHeaders(loginState *LoginState, header http.Header) {
@@ -788,19 +803,67 @@ var appleAccountFingerprintCodes = map[int]appleAccountFingerprintCode{
 	52: {5, 1}, 54: {5, 0},
 }
 
-func appleAccountAPIError(status int, data []byte) error {
-	msg := strings.TrimSpace(trimForError(data))
+func appleAccountAPIError(status int, data []byte, stage string) error {
+	detail := appleAccountErrorDetail(status, data, stage)
+	msg := strings.TrimSpace(appleDebugBody(data))
 	if msg == "" {
-		msg = fmt.Sprintf("Apple Account HTTP %d", status)
+		msg = "空响应"
 	}
 	lower := strings.ToLower(msg)
 	if strings.Contains(lower, "limit") || strings.Contains(lower, "too many") || strings.Contains(lower, "rate") {
-		return errCode("apple_account_hme_limit", "Apple Account 已达到当前隐私邮箱创建上限，请稍后再试", true)
+		return errCode("apple_account_hme_limit", "Apple Account 已达到当前隐私邮箱创建上限，请稍后再试；"+detail, true)
 	}
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
-		return errCode("apple_account_auth_failed", "Apple Account 管理态已失效，请重新协议登录", true)
+		return errCode("apple_account_auth_failed", "Apple Account 管理态已失效，请重新协议登录；"+detail, true)
 	}
-	return errCode("apple_account_api_failed", msg, true)
+	return errCode("apple_account_api_failed", "Apple Account 接口失败；"+detail, true)
+}
+
+func appleAccountErrorDetail(status int, data []byte, stage string) string {
+	stage = strings.TrimSpace(stage)
+	if stage == "" {
+		stage = "未知阶段"
+	}
+	body := strings.TrimSpace(appleDebugBody(data))
+	if body == "" {
+		body = "空响应"
+	}
+	return fmt.Sprintf("阶段：%s；HTTP %d；原始返回：%s", stage, status, body)
+}
+
+func appleAccountResponseDetail(stage string, data []byte) string {
+	stage = strings.TrimSpace(stage)
+	if stage == "" {
+		stage = "未知阶段"
+	}
+	body := strings.TrimSpace(appleDebugBody(data))
+	if body == "" {
+		body = "空响应"
+	}
+	return fmt.Sprintf("阶段：%s；原始返回：%s", stage, body)
+}
+
+func appleAccountRequestStage(method, path string) string {
+	method = strings.ToUpper(strings.TrimSpace(method))
+	path = strings.TrimSpace(path)
+	switch {
+	case path == "/account/manage/gs/ws/token":
+		return "刷新管理 token"
+	case path == "/account/manage":
+		return "读取管理入口"
+	case path == "/account/manage/section/privacy":
+		return "打开隐私页面"
+	case path == "/bootstrap/portal":
+		return "预热门户"
+	case method == http.MethodPost && path == "/account/manage/email/private/add":
+		return "生成候选隐私邮箱"
+	case method == http.MethodPut && path == "/account/manage/email/private/add/complete":
+		return "确认创建隐私邮箱"
+	case method == http.MethodGet && strings.HasPrefix(path, "/account/manage/email/private/") && strings.HasSuffix(path, ".em"):
+		return "确认隐私邮箱详情"
+	default:
+		return strings.TrimSpace(method + " " + path)
+	}
 }
 
 func isCodedError(err error, code string) bool {
@@ -860,7 +923,7 @@ func (c *ICloudClient) callEnvelope(ctx context.Context, session ICloudSession, 
 		Timestamp int64 `json:"timestamp"`
 	}
 	if err := json.Unmarshal(data, &envelope); err != nil {
-		return errCode("icloud_bad_response", "iCloud 返回无法解析", true)
+		return errCode("icloud_bad_response", "iCloud 返回无法解析；原始返回："+trimForError(data), true)
 	}
 	if !envelope.Success {
 		msg := "iCloud 接口返回失败"
@@ -871,7 +934,7 @@ func (c *ICloudClient) callEnvelope(ctx context.Context, session ICloudSession, 
 	}
 	if result != nil {
 		if err := json.Unmarshal(envelope.Result, result); err != nil {
-			return errCode("icloud_bad_result", "iCloud 结果无法解析", true)
+			return errCode("icloud_bad_result", "iCloud 结果无法解析；原始返回："+trimForError(envelope.Result), true)
 		}
 	}
 	return nil
@@ -883,7 +946,7 @@ func iCloudAPIError(message string) error {
 		message = "iCloud 接口返回失败"
 	}
 	if isICloudHMELimitMessage(message) {
-		return errCode("icloud_hme_limit", "iCloud 已达到当前隐私邮箱创建上限，请稍后再试", true)
+		return errCode("icloud_hme_limit", "iCloud 已达到当前隐私邮箱创建上限，请稍后再试；原始返回："+trimForError([]byte(message)), true)
 	}
 	return errCode("icloud_api_failed", message, true)
 }

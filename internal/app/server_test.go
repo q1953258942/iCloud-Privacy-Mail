@@ -488,6 +488,67 @@ func TestICloudCreateLimitErrorIsClassified(t *testing.T) {
 	if coded.code != "icloud_hme_limit" || !coded.retryable {
 		t.Fatalf("coded error = %+v, want icloud_hme_limit retryable", coded)
 	}
+	if !strings.Contains(err.Error(), "原始返回：You have reached the limit") {
+		t.Fatalf("error = %q, want raw limit message", err.Error())
+	}
+}
+
+func TestAppleAccountAPIErrorIncludesStageHTTPAndRawBody(t *testing.T) {
+	err := appleAccountAPIError(http.StatusNotFound, []byte("<html><body>not found</body></html>"), "生成候选隐私邮箱")
+	coded, ok := err.(codedError)
+	if !ok {
+		t.Fatalf("error type = %T, want codedError", err)
+	}
+	if coded.code != "apple_account_api_failed" || !coded.retryable {
+		t.Fatalf("coded error = %+v, want apple_account_api_failed retryable", coded)
+	}
+	message := err.Error()
+	for _, want := range []string{"阶段：生成候选隐私邮箱", "HTTP 404", "<html><body>not found</body></html>"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("error = %q, want %q", message, want)
+		}
+	}
+}
+
+func TestICloudClientAppleAccountGenerateEmptyIncludesRawBody(t *testing.T) {
+	oldBaseURL := appleAccountManageBaseURL
+	defer func() { appleAccountManageBaseURL = oldBaseURL }()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "POST /account/manage/email/private/add":
+			_, _ = w.Write([]byte(`{"unexpected":true}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer ts.Close()
+	appleAccountManageBaseURL = ts.URL
+
+	client := &ICloudClient{client: ts.Client()}
+	_, _, err := client.CreatePrivacyMailboxWithAppleAccount(t.Context(), ICloudSession{
+		LoginStates: []LoginState{{
+			Kind:          LoginStateAppleAccount,
+			Scnt:          "scnt-current",
+			APIKey:        "fresh-key",
+			LastCheckedAt: time.Now(),
+			LastCheckOK:   true,
+		}},
+	}, "", "LAB", "")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	coded, ok := err.(codedError)
+	if !ok || coded.code != "apple_account_generate_empty" {
+		t.Fatalf("error = %#v, want apple_account_generate_empty", err)
+	}
+	message := err.Error()
+	for _, want := range []string{"阶段：生成候选隐私邮箱", `原始返回：{"unexpected":true}`} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("error = %q, want %q", message, want)
+		}
+	}
 }
 
 func TestICloudClientCreatePrivacyMailboxWithAppleAccount(t *testing.T) {
@@ -683,6 +744,83 @@ func TestICloudClientCreatePrivacyMailboxWithAppleAccountReusesFreshState(t *tes
 	}
 }
 
+func TestICloudClientCreatePrivacyMailboxWithAppleAccountReusesFreshStateAfterFailedCheck(t *testing.T) {
+	oldBaseURL := appleAccountManageBaseURL
+	defer func() { appleAccountManageBaseURL = oldBaseURL }()
+
+	var paths []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /account/manage/gs/ws/token", "GET /account/manage":
+			t.Fatalf("unexpected refresh request %s %s", r.Method, r.URL.Path)
+		case "POST /account/manage/email/private/add":
+			if r.Header.Get("X-Apple-Api-Key") != "recent-key" {
+				t.Fatalf("add api key header = %q, want recent-key", r.Header.Get("X-Apple-Api-Key"))
+			}
+			if r.Header.Get("scnt") != "recent-scnt" {
+				t.Fatalf("add scnt header = %q, want recent-scnt", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "scnt-after-add")
+			_, _ = w.Write([]byte(`{"emailAddress":"Recovered.Alias@icloud.com","active":false}`))
+		case "PUT /account/manage/email/private/add/complete":
+			if r.Header.Get("X-Apple-Api-Key") != "recent-key" {
+				t.Fatalf("complete api key header = %q, want recent-key", r.Header.Get("X-Apple-Api-Key"))
+			}
+			if r.Header.Get("scnt") != "scnt-after-add" {
+				t.Fatalf("complete scnt header = %q, want scnt-after-add", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "scnt-after-complete")
+			_, _ = w.Write([]byte(`{"emailAddress":"Recovered.Alias@icloud.com","id":"recovered123","active":true}`))
+		case "GET /account/manage/email/private/recovered123.em":
+			if r.Header.Get("X-Apple-Api-Key") != "recent-key" {
+				t.Fatalf("confirm api key header = %q, want recent-key", r.Header.Get("X-Apple-Api-Key"))
+			}
+			if r.Header.Get("scnt") != "scnt-after-complete" {
+				t.Fatalf("confirm scnt header = %q, want scnt-after-complete", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "scnt-after-confirm")
+			_, _ = w.Write([]byte(`{"emailAddress":"Recovered.Alias@icloud.com","id":"recovered123","active":true}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer ts.Close()
+	appleAccountManageBaseURL = ts.URL
+
+	checkedAt := time.Now()
+	client := &ICloudClient{client: ts.Client()}
+	remote, updatedSession, err := client.CreatePrivacyMailboxWithAppleAccount(t.Context(), ICloudSession{
+		LoginStates: []LoginState{{
+			Kind:              LoginStateAppleAccount,
+			Scnt:              "recent-scnt",
+			APIKey:            "recent-key",
+			LastCheckedAt:     checkedAt,
+			LastCheckOK:       false,
+			LastStatusMessage: "新接口登录态异常：HTTP 404",
+		}},
+	}, "", "LAB", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.Email != "recovered.alias@icloud.com" {
+		t.Fatalf("remote email = %q, want recovered.alias@icloud.com", remote.Email)
+	}
+	wantPaths := []string{
+		"POST /account/manage/email/private/add",
+		"PUT /account/manage/email/private/add/complete",
+		"GET /account/manage/email/private/recovered123.em",
+	}
+	if strings.Join(paths, "\n") != strings.Join(wantPaths, "\n") {
+		t.Fatalf("paths = %#v, want %#v", paths, wantPaths)
+	}
+	updatedState, ok := appleAccountLoginState(updatedSession)
+	if !ok || updatedState.Scnt != "scnt-after-confirm" || updatedState.APIKey != "recent-key" || !updatedState.LastCheckOK || updatedState.LastCheckedAt.IsZero() || updatedState.LastCheckedAt.Before(checkedAt) {
+		t.Fatalf("updated apple account state = %+v ok=%v, want reused state marked ok", updatedState, ok)
+	}
+}
+
 func TestICloudClientCreatePrivacyMailboxWithAppleAccountRefreshesAfterAuthFailure(t *testing.T) {
 	oldBaseURL := appleAccountManageBaseURL
 	defer func() { appleAccountManageBaseURL = oldBaseURL }()
@@ -841,6 +979,40 @@ func TestCheckSavedLoginStatesChecksAppleAccountState(t *testing.T) {
 	}
 	if strings.Join(paths, "\n") != strings.Join(wantPaths, "\n") {
 		t.Fatalf("paths = %#v, want %#v", paths, wantPaths)
+	}
+}
+
+func TestCheckSavedLoginStatesKeepsRecentlyHealthyAppleAccountState(t *testing.T) {
+	called := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		http.Error(w, "should not refresh recently healthy state", http.StatusTeapot)
+	}))
+	defer ts.Close()
+
+	now := time.Now()
+	client := &ICloudClient{client: ts.Client()}
+	session, ok, err := checkSavedLoginStates(context.Background(), client, ICloudSession{
+		LoginStates: []LoginState{{
+			Kind:              LoginStateAppleAccount,
+			Host:              "appleid.apple.com",
+			Origin:            ts.URL,
+			Scnt:              "fresh-scnt",
+			APIKey:            "fresh-key",
+			LastCheckOK:       true,
+			LastCheckedAt:     now.Add(-time.Minute),
+			LastStatusMessage: "新接口登录态正常",
+		}},
+	}, now)
+	if err != nil || !ok {
+		t.Fatalf("checkSavedLoginStates err=%v ok=%t", err, ok)
+	}
+	if called {
+		t.Fatal("recently healthy Apple Account state should not be refreshed")
+	}
+	state, found := appleAccountLoginState(session)
+	if !found || !state.LastCheckOK || state.LastStatusMessage != "新接口登录态正常" || !state.LastCheckedAt.Equal(now) {
+		t.Fatalf("state = %+v found=%t, want healthy state updated at check time", state, found)
 	}
 }
 
@@ -2645,6 +2817,7 @@ func TestLookupMailboxesRequiresGlobalAPIKeyAndKeepsStatus(t *testing.T) {
 }
 
 func TestMailboxSchedulerStartsCreatesAndStops(t *testing.T) {
+	withDefaultMailboxSchedulerRoundInterval(t, 10*time.Millisecond)
 	store := newTestStore(t)
 	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
 	server := handler.(*Server)
@@ -2731,6 +2904,85 @@ func TestMailboxSchedulerStartsCreatesAndStops(t *testing.T) {
 	}
 }
 
+func withDefaultMailboxSchedulerRoundInterval(t *testing.T, interval time.Duration) {
+	t.Helper()
+	old := defaultMailboxSchedulerRoundInterval
+	defaultMailboxSchedulerRoundInterval = interval
+	t.Cleanup(func() {
+		defaultMailboxSchedulerRoundInterval = old
+	})
+}
+
+func TestMailboxSchedulerStatusDefaultsRoundInterval(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
+	cookie, _ := registerTestUser(t, handler, "timer-default-round", "timer123")
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/icloud/scheduler/status", nil)
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("scheduler status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Scheduler publicMailboxScheduler `json:"scheduler"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Scheduler.RoundIntervalSeconds != 5 {
+		t.Fatalf("default round interval = %d, want 5", body.Scheduler.RoundIntervalSeconds)
+	}
+}
+
+func TestMailboxSchedulerStartAcceptsRoundIntervalSeconds(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
+	server := handler.(*Server)
+	cookie, user := registerTestUser(t, handler, "timer-custom-round", "timer123")
+	if err := store.SaveICloudSessionForOwner(user.ID, ICloudSession{
+		OwnerID:            user.ID,
+		SavedAt:            time.Now(),
+		DSID:               "dsid-round",
+		PremiumMailBaseURL: "https://example.invalid",
+		IsICloudPlus:       true,
+		CanCreateHME:       true,
+		Cookies:            []SessionCookie{{Name: "X-APPLE-WEBAUTH", Value: "cookie", Domain: ".icloud.com", Path: "/"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server.createMailboxForOwner = func(ctx context.Context, ownerID, accountID, label, note string) (Mailbox, ICloudRemoteMailbox, error) {
+		<-ctx.Done()
+		return Mailbox{}, ICloudRemoteMailbox{}, ctx.Err()
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/icloud/scheduler/start", strings.NewReader(`{"interval_minutes":60,"round_interval_seconds":7,"label":"SCH"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("start scheduler = %d body=%s", rr.Code, rr.Body.String())
+	}
+	defer func() {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/icloud/scheduler/stop", strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(cookie)
+		handler.ServeHTTP(rr, req)
+	}()
+	var body struct {
+		Scheduler publicMailboxScheduler `json:"scheduler"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Scheduler.RoundIntervalSeconds != 7 {
+		t.Fatalf("round interval = %d, want 7", body.Scheduler.RoundIntervalSeconds)
+	}
+}
+
 func TestMailboxSchedulerClearLogsKeepsCounters(t *testing.T) {
 	store := newTestStore(t)
 	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
@@ -2780,6 +3032,7 @@ func TestMailboxSchedulerClearLogsKeepsCounters(t *testing.T) {
 }
 
 func TestMailboxSchedulerRunsUntilAllAccountsFailWithOnlyInterval(t *testing.T) {
+	withDefaultMailboxSchedulerRoundInterval(t, 10*time.Millisecond)
 	store := newTestStore(t)
 	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
 	server := handler.(*Server)
@@ -2894,6 +3147,65 @@ func TestMailboxSchedulerRunsUntilAllAccountsFailWithOnlyInterval(t *testing.T) 
 		t.Fatalf("worker account attempts = %d, want 3; attempts=%+v", attempts[workerAccountID], attempts)
 	}
 	mu.Unlock()
+}
+
+func TestMailboxSchedulerBatchWaitsBetweenCreateRounds(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
+	server := handler.(*Server)
+	ownerID := "owner-scheduler-round-wait"
+	if err := store.SaveICloudSessionForOwner(ownerID, ICloudSession{
+		OwnerID:            ownerID,
+		AppleID:            "round@example.com",
+		DSID:               "dsid-round-wait",
+		PremiumMailBaseURL: "https://example.invalid",
+		IsICloudPlus:       true,
+		CanCreateHME:       true,
+		Cookies:            []SessionCookie{{Name: "X-APPLE-WEBAUTH", Value: "cookie", Domain: ".icloud.com", Path: "/"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessions := store.ICloudSessionsForOwner(ownerID)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(sessions))
+	}
+	accountID := sessions[0].AccountID
+
+	var attemptsMu sync.Mutex
+	var attemptTimes []time.Time
+	server.createMailboxForOwner = func(ctx context.Context, ownerID, accountID, label, note string) (Mailbox, ICloudRemoteMailbox, error) {
+		attemptsMu.Lock()
+		attemptTimes = append(attemptTimes, time.Now())
+		attempt := len(attemptTimes)
+		attemptsMu.Unlock()
+		if attempt > 2 {
+			return Mailbox{}, ICloudRemoteMailbox{}, errCode("icloud_hme_limit", "当前小时额度已用完", true)
+		}
+		mailbox, err := store.AddMailboxForOwner(ownerID, accountID, label, fmt.Sprintf("round-%d@icloud.com", attempt))
+		if err != nil {
+			return Mailbox{}, ICloudRemoteMailbox{}, err
+		}
+		return mailbox, ICloudRemoteMailbox{Email: mailbox.Email, Label: mailbox.Label, IsActive: true}, nil
+	}
+
+	roundInterval := 40 * time.Millisecond
+	job := &mailboxSchedulerJob{state: mailboxSchedulerState{Running: true, BatchSize: 1}}
+	server.runMailboxSchedulerBatch(context.Background(), ownerID, job, mailboxSchedulerConfig{
+		AccountIDs:    []string{accountID},
+		Label:         "SCH",
+		BatchSize:     1,
+		RoundInterval: roundInterval,
+	}, 1)
+	attemptsMu.Lock()
+	defer attemptsMu.Unlock()
+	if len(attemptTimes) != 3 {
+		t.Fatalf("attempts = %d, want 3", len(attemptTimes))
+	}
+	for i := 1; i < len(attemptTimes); i++ {
+		if got := attemptTimes[i].Sub(attemptTimes[i-1]); got < roundInterval-5*time.Millisecond {
+			t.Fatalf("attempt %d delay = %s, want at least %s", i+1, got, roundInterval)
+		}
+	}
 }
 
 func TestMailboxSchedulerSkipsFailedAccountWithinCurrentBatch(t *testing.T) {

@@ -1063,7 +1063,8 @@
             <span id="protoBatchProgress" class="muted">每次点击会让当前勾选账号同时创建 1 轮，并记录本次成功/失败数量。</span>
           </div>
           <div class="field-grid">
-            <label class="full">定时间隔分钟<input id="scheduleIntervalMinutes" type="number" min="1" max="1440" value="60" placeholder="默认 60"></label>
+            <label>定时间隔分钟<input id="scheduleIntervalMinutes" type="number" min="1" max="1440" value="60" placeholder="默认 60"></label>
+            <label>每轮创建间隔秒<input id="scheduleRoundIntervalSeconds" type="number" min="1" max="600" value="5" placeholder="默认 5"></label>
           </div>
           <div class="toolbar">
             <button id="startScheduleButton" class="primary" onclick="startMailboxScheduler()">开始定时创建</button>
@@ -1857,12 +1858,13 @@
         account_ids: accountIDs,
         label: $('protoLabel').value.trim(),
         note: $('protoNote').value.trim(),
-        interval_minutes: boundedInt('scheduleIntervalMinutes', 60, 1, 1440)
+        interval_minutes: boundedInt('scheduleIntervalMinutes', 60, 1, 1440),
+        round_interval_seconds: boundedInt('scheduleRoundIntervalSeconds', 5, 1, 600)
       };
       const data = await api('/api/icloud/scheduler/start', {method:'POST', body: JSON.stringify(payload)});
       renderMailboxScheduler(data.scheduler || {});
       ensureSchedulerPolling();
-      log(`定时创建已启动：每 ${payload.interval_minutes} 分钟开始一次；失败账号本轮临时跳过，其他账号继续创建；参与账号=${accountNames}`);
+      log(`定时创建已启动：每 ${payload.interval_minutes} 分钟开始一次；每轮创建间隔 ${payload.round_interval_seconds} 秒；失败账号本轮临时跳过，其他账号继续创建；参与账号=${accountNames}`);
     }
 
     async function stopMailboxScheduler() {
@@ -1905,10 +1907,11 @@
       if ($('stopScheduleButton')) $('stopScheduleButton').disabled = !running;
       if ($('scheduleStatus')) {
         const interval = scheduler.interval_minutes || Math.round((scheduler.interval_seconds || 0) / 60) || 60;
+        const roundInterval = scheduler.round_interval_seconds || 5;
         const next = scheduler.next_run_at ? `；下次：${scheduler.next_run_at}` : '';
         const statusText = running
-          ? `运行中：每 ${interval} 分钟开始一次；已创建 ${scheduler.success || 0}，失败 ${scheduler.failed || 0}${next}`
-          : `未运行：默认每 60 分钟开始一次；历史创建 ${scheduler.success || 0}，失败 ${scheduler.failed || 0}`;
+          ? `运行中：每 ${interval} 分钟开始一次；每轮间隔 ${roundInterval} 秒；已创建 ${scheduler.success || 0}，失败 ${scheduler.failed || 0}${next}`
+          : `未运行：默认每 60 分钟开始一次，每轮间隔 5 秒；历史创建 ${scheduler.success || 0}，失败 ${scheduler.failed || 0}`;
         $('scheduleStatus').textContent = scheduler.last_error ? `${statusText}；最近错误：${scheduler.last_error}` : statusText;
       }
       setScheduleLog(events.length === 0 ? '暂无定时创建记录。' : events.slice(0, 30).map(event => {
