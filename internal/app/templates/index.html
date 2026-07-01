@@ -2854,7 +2854,8 @@
       try {
         const url = mailboxCodeURL(row, {
           waitMs: 12000,
-          after: new Date(Date.now() - 5 * 60 * 1000).toISOString()
+          after: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+          peek: true
         });
         const res = await fetch(url.toString());
         const data = await res.json();
@@ -2878,6 +2879,7 @@
       url.searchParams.set('keyword', options.keyword || 'ChatGPT');
       if (options.waitMs) url.searchParams.set('wait_ms', String(options.waitMs));
       if (options.after) url.searchParams.set('after', options.after);
+      if (options.peek) url.searchParams.set('peek', '1');
       return url;
     }
 

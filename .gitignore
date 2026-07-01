@@ -1,4 +1,5 @@
 # Build outputs
+build/
 bin/
 dist/
 发布目录/
@@ -14,6 +15,7 @@ captures/
 苹果登录JS分析/
 .anna_manifest_tmp.json
 .anna_skills/
+verification-code-speedup.md
 *.db
 *.sqlite
 *.sqlite3

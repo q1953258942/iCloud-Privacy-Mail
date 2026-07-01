@@ -742,6 +742,53 @@ func (s *FileStore) SetMailboxSyncCursor(id string, syncedAt time.Time, lastUID 
 	return s.state.Mailboxes[idx], s.saveLocked()
 }
 
+func (s *FileStore) SetICloudIMAPSyncCursor(ownerID, accountID, stateKey string, syncedAt time.Time, lastUID string) (ICloudSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ownerID = strings.TrimSpace(ownerID)
+	accountID = strings.TrimSpace(accountID)
+	stateKey = strings.TrimSpace(stateKey)
+	if syncedAt.IsZero() {
+		syncedAt = time.Now()
+	}
+	updateSession := func(session *ICloudSession) bool {
+		if session == nil {
+			return false
+		}
+		if ownerID != "" && !constantTimeEqual(ownerID, session.OwnerID) {
+			return false
+		}
+		if accountID != "" && !constantTimeEqual(accountID, session.AccountID) {
+			return false
+		}
+		for i, state := range session.LoginStates {
+			if state.Kind != LoginStateICloudIMAP {
+				continue
+			}
+			if accountID == "" && stateKey != "" && imapStateKey(state) != stateKey {
+				continue
+			}
+			session.LoginStates[i].IMAPLastSyncAt = syncedAt
+			if strings.TrimSpace(lastUID) != "" {
+				session.LoginStates[i].IMAPLastSyncUID = strings.TrimSpace(lastUID)
+			}
+			return true
+		}
+		return false
+	}
+	if ownerID == "" && s.state.ICloudSession != nil && updateSession(s.state.ICloudSession) {
+		return cloneICloudSession(*s.state.ICloudSession), s.saveLocked()
+	}
+	for i := range s.state.ICloudSessions {
+		if updateSession(&s.state.ICloudSessions[i]) {
+			updated := cloneICloudSession(s.state.ICloudSessions[i])
+			return updated, s.saveLocked()
+		}
+	}
+	return ICloudSession{}, errCode("imap_session_missing", "未找到取码登录态，无法保存 IMAP 同步游标", true)
+}
+
 func (s *FileStore) SetMailboxLastCode(id string, messageID string, servedAt time.Time) (Mailbox, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -41,43 +41,44 @@ const (
 	defaultMailWatcherFetchLimit        = 8
 	defaultMailWatcherInitialFetchLimit = 20
 	defaultMailWatcherLookback          = 24 * time.Hour
-	mailWatcherSyncTimeout              = 25 * time.Second
+	mailWatcherSyncTimeout              = 90 * time.Second
 )
 
 type Server struct {
-	cfg                          Config
-	store                        *FileStore
-	logger                       *slog.Logger
-	mux                          *http.ServeMux
-	icloudProtocolLogins         *appleAuthPendingStore
-	appleAccountLogins           *appleAuthPendingStore
-	icloudCreateMu               sync.Mutex
-	icloudCreateGates            map[string]chan struct{}
-	icloudCreateLast             map[string]time.Time
-	icloudCreateCooldown         map[string]time.Time
-	icloudMailSyncMu             sync.Mutex
-	icloudMailSyncGates          map[string]chan struct{}
-	icloudMailSyncLast           map[string]time.Time
-	mailboxSyncMinInterval       time.Duration
-	mailboxCodeFastWait          time.Duration
-	mailboxCodeMu                sync.Mutex
-	mailboxCodePollers           map[string]*mailboxCodePoller
-	mailWatcherMu                sync.Mutex
-	mailWatcherCancel            context.CancelFunc
-	mailWatcherWake              chan struct{}
-	mailWatcherEnabled           bool
-	mailWatcherInterval          time.Duration
-	mailWatcherFetchLimit        int
-	mailWatcherInitialFetchLimit int
-	mailWatcherLookback          time.Duration
-	mailWatcherActiveUntil       map[string]time.Time
-	schedulerMu                  sync.Mutex
-	mailboxSchedulers            map[string]*mailboxSchedulerJob
-	createMailboxForOwner        func(ctx context.Context, ownerID, accountID, label, note string) (Mailbox, ICloudRemoteMailbox, error)
-	syncMailboxMessages          func(ctx context.Context, session ICloudSession, mailbox Mailbox, after time.Time, keyword string, maxThreads int) ([]ICloudSyncedMessage, error)
-	syncMailboxBatch             func(ctx context.Context, session ICloudSession, mailboxes []Mailbox, after time.Time, keyword string, maxThreads int) (map[string][]ICloudSyncedMessage, error)
-	syncCodeMailboxBatch         func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (map[string][]ICloudSyncedMessage, error)
-	checkIMAPLogin               func(ctx context.Context, email, appPassword string) error
+	cfg                            Config
+	store                          *FileStore
+	logger                         *slog.Logger
+	mux                            *http.ServeMux
+	icloudProtocolLogins           *appleAuthPendingStore
+	appleAccountLogins             *appleAuthPendingStore
+	icloudCreateMu                 sync.Mutex
+	icloudCreateGates              map[string]chan struct{}
+	icloudCreateLast               map[string]time.Time
+	icloudCreateCooldown           map[string]time.Time
+	icloudMailSyncMu               sync.Mutex
+	icloudMailSyncGates            map[string]chan struct{}
+	icloudMailSyncLast             map[string]time.Time
+	mailboxSyncMinInterval         time.Duration
+	mailboxCodeFastWait            time.Duration
+	mailboxCodeMu                  sync.Mutex
+	mailboxCodePollers             map[string]*mailboxCodePoller
+	mailWatcherMu                  sync.Mutex
+	mailWatcherCancel              context.CancelFunc
+	mailWatcherWake                chan struct{}
+	mailWatcherEnabled             bool
+	mailWatcherInterval            time.Duration
+	mailWatcherFetchLimit          int
+	mailWatcherInitialFetchLimit   int
+	mailWatcherLookback            time.Duration
+	mailWatcherActiveUntil         map[string]time.Time
+	schedulerMu                    sync.Mutex
+	mailboxSchedulers              map[string]*mailboxSchedulerJob
+	createMailboxForOwner          func(ctx context.Context, ownerID, accountID, label, note string) (Mailbox, ICloudRemoteMailbox, error)
+	syncMailboxMessages            func(ctx context.Context, session ICloudSession, mailbox Mailbox, after time.Time, keyword string, maxThreads int) ([]ICloudSyncedMessage, error)
+	syncMailboxBatch               func(ctx context.Context, session ICloudSession, mailboxes []Mailbox, after time.Time, keyword string, maxThreads int) (map[string][]ICloudSyncedMessage, error)
+	syncCodeMailboxBatch           func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (map[string][]ICloudSyncedMessage, error)
+	syncCodeMailboxBatchWithCursor func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (iCloudIMAPSyncResult, error)
+	checkIMAPLogin                 func(ctx context.Context, email, appPassword string) error
 }
 
 type createMailboxFailure struct {
@@ -171,6 +172,19 @@ type mailboxCodePoller struct {
 type mailboxWatcherOwnerGroup struct {
 	ownerID   string
 	mailboxes []Mailbox
+}
+
+type mailboxWatcherIMAPGroup struct {
+	key       string
+	ownerID   string
+	state     LoginState
+	mailboxes []Mailbox
+	signature string
+}
+
+type mailboxWatcherIdleWorker struct {
+	cancel    context.CancelFunc
+	signature string
 }
 
 func NewServer(cfg Config, store *FileStore, logger *slog.Logger) http.Handler {
@@ -2208,6 +2222,11 @@ func (s *Server) writeMailboxCode(w http.ResponseWriter, r *http.Request, mailbo
 	codeAfter := mailboxCodeAfter(after, now)
 	allowStale := truthy(r.URL.Query().Get("allow_stale"))
 	cacheOnly := truthy(r.URL.Query().Get("cache"))
+	peekOnly := truthy(r.URL.Query().Get("peek")) || truthy(r.URL.Query().Get("preview"))
+	skipMessageID := strings.TrimSpace(mailbox.LastCodeMessageID)
+	if peekOnly {
+		skipMessageID = ""
+	}
 	messages := s.store.MessagesForMailbox(mailbox.ID)
 	if cacheOnly {
 		if msg, code, ok := latestMailboxCode(messages, codeAfter, keyword, now); ok {
@@ -2217,22 +2236,22 @@ func (s *Server) writeMailboxCode(w http.ResponseWriter, r *http.Request, mailbo
 		writeError(w, http.StatusOK, errCode("no_code", "暂未收到验证码", true))
 		return
 	}
-	if msg, code, ok := latestMailboxCodeSkipping(messages, codeAfter, keyword, now, mailbox.LastCodeMessageID); ok {
-		s.writeMailboxCodeSuccess(w, mailbox, msg, code, "", true)
+	if msg, code, ok := latestMailboxCodeSkipping(messages, codeAfter, keyword, now, skipMessageID); ok {
+		s.writeMailboxCodeSuccess(w, mailbox, msg, code, "", !peekOnly)
 		return
 	}
 
-	result := s.waitMailboxCode(r.Context(), mailbox, codeAfter, keyword, true, mailbox.LastCodeMessageID, s.mailboxCodeWaitDuration(r))
+	result := s.waitMailboxCode(r.Context(), mailbox, codeAfter, keyword, true, skipMessageID, s.mailboxCodeWaitDuration(r))
 	if result.syncErr != nil {
 		s.logger.Warn("icloud sync failed", "mailbox_id", mailbox.ID, "err", result.syncErr)
 	}
 	if result.ok {
-		s.writeMailboxCodeSuccess(w, mailbox, result.message, result.code, staleCacheMessage(result.syncErr), true)
+		s.writeMailboxCodeSuccess(w, mailbox, result.message, result.code, staleCacheMessage(result.syncErr), !peekOnly)
 		return
 	}
 	if result.syncErr != nil && allowStale {
-		if msg, code, ok := latestMailboxCodeSkipping(s.store.MessagesForMailbox(mailbox.ID), codeAfter, keyword, time.Now(), mailbox.LastCodeMessageID); ok {
-			s.writeMailboxCodeSuccess(w, mailbox, msg, code, "取码同步失败，当前验证码来自本地缓存", true)
+		if msg, code, ok := latestMailboxCodeSkipping(s.store.MessagesForMailbox(mailbox.ID), codeAfter, keyword, time.Now(), skipMessageID); ok {
+			s.writeMailboxCodeSuccess(w, mailbox, msg, code, "取码同步失败，当前验证码来自本地缓存", !peekOnly)
 			return
 		}
 	}
@@ -2480,36 +2499,53 @@ func (s *Server) latestMailboxCodeForWaiter(waiter *mailboxCodeWaiter) (Message,
 }
 
 func (s *Server) syncMailboxesForCodeWaiters(ctx context.Context, ownerID string, waiters []*mailboxCodeWaiter) error {
-	byID := make(map[string]Mailbox)
-	var minAfter time.Time
+	type keywordGroup struct {
+		keyword  string
+		byID     map[string]Mailbox
+		minAfter time.Time
+	}
+	groups := make(map[string]*keywordGroup)
 	for _, waiter := range waiters {
 		if waiterCanceled(waiter) {
-			continue
-		}
-		if minAfter.IsZero() || waiter.after.Before(minAfter) {
-			minAfter = waiter.after
-		}
-		if _, seen := byID[waiter.mailboxID]; seen {
 			continue
 		}
 		mailbox, ok := s.store.FindMailboxByID(waiter.mailboxID)
 		if !ok || !mailbox.APIActive || mailbox.Status == StatusDisabled || !mailbox.ICloudActive {
 			continue
 		}
-		byID[waiter.mailboxID] = mailbox
+		keyword := strings.TrimSpace(waiter.keyword)
+		if keyword == "" {
+			keyword = "OpenAI"
+		}
+		groupKey := strings.ToLower(keyword)
+		group := groups[groupKey]
+		if group == nil {
+			group = &keywordGroup{keyword: keyword, byID: make(map[string]Mailbox)}
+			groups[groupKey] = group
+		}
+		if group.minAfter.IsZero() || waiter.after.Before(group.minAfter) {
+			group.minAfter = waiter.after
+		}
+		group.byID[waiter.mailboxID] = mailbox
 	}
-	if len(byID) == 0 {
+	if len(groups) == 0 {
 		return nil
 	}
-	mailboxes := make([]Mailbox, 0, len(byID))
-	for _, mailbox := range byID {
-		mailboxes = append(mailboxes, mailbox)
+	var firstErr error
+	for _, group := range groups {
+		mailboxes := make([]Mailbox, 0, len(group.byID))
+		for _, mailbox := range group.byID {
+			mailboxes = append(mailboxes, mailbox)
+		}
+		sort.Slice(mailboxes, func(i, j int) bool {
+			return mailboxes[i].Email < mailboxes[j].Email
+		})
+		_, err := s.syncMailboxCodeBatchForOwnerWithLimit(ctx, ownerID, mailboxes, group.minAfter, group.keyword, 0)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	sort.Slice(mailboxes, func(i, j int) bool {
-		return mailboxes[i].Email < mailboxes[j].Email
-	})
-	_, err := s.syncMailboxCodeBatchForOwnerWithLimit(ctx, ownerID, mailboxes, minAfter, "OpenAI", 0)
-	return err
+	return firstErr
 }
 
 func (s *Server) runMailWatcher(ctx context.Context) {
@@ -2520,6 +2556,15 @@ func (s *Server) runMailWatcher(ctx context.Context) {
 	}()
 
 	s.syncMailWatcherRound(ctx, true)
+	idleWorkers := make(map[string]mailboxWatcherIdleWorker)
+	stopIdleWorkers := func() {
+		for key, worker := range idleWorkers {
+			worker.cancel()
+			delete(idleWorkers, key)
+		}
+	}
+	defer stopIdleWorkers()
+	s.ensureMailWatcherIdleWorkers(ctx, idleWorkers)
 	interval := s.mailWatcherInterval
 	if interval <= 0 {
 		interval = mailWatcherPollInterval
@@ -2531,9 +2576,68 @@ func (s *Server) runMailWatcher(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-s.mailWatcherWake:
+			s.ensureMailWatcherIdleWorkers(ctx, idleWorkers)
 			s.syncMailWatcherRound(ctx, false)
 		case <-ticker.C:
+			s.ensureMailWatcherIdleWorkers(ctx, idleWorkers)
 			s.syncMailWatcherRound(ctx, false)
+		}
+	}
+}
+
+func (s *Server) ensureMailWatcherIdleWorkers(ctx context.Context, workers map[string]mailboxWatcherIdleWorker) {
+	groups := s.mailWatcherIMAPGroups()
+	seen := make(map[string]struct{}, len(groups))
+	for _, group := range groups {
+		seen[group.key] = struct{}{}
+		if worker, ok := workers[group.key]; ok && worker.signature == group.signature {
+			continue
+		}
+		if worker, ok := workers[group.key]; ok {
+			worker.cancel()
+		}
+		workerCtx, cancel := context.WithCancel(ctx)
+		workers[group.key] = mailboxWatcherIdleWorker{cancel: cancel, signature: group.signature}
+		go s.runMailWatcherIdleWorker(workerCtx, group)
+	}
+	for key, worker := range workers {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		worker.cancel()
+		delete(workers, key)
+	}
+}
+
+func (s *Server) runMailWatcherIdleWorker(ctx context.Context, group mailboxWatcherIMAPGroup) {
+	backoff := time.Second
+	for ctx.Err() == nil {
+		err := WatchICloudIMAPExists(ctx, group.state, func() {
+			if ctx.Err() != nil {
+				return
+			}
+			syncCtx, cancel := context.WithTimeout(ctx, mailWatcherSyncTimeout)
+			_, syncErr := s.syncMailboxCodeBatchForOwnerWithLimit(syncCtx, group.ownerID, group.mailboxes, time.Time{}, "ChatGPT", s.mailWatcherFetchLimit)
+			cancel()
+			if syncErr != nil && ctx.Err() == nil && s.logger != nil {
+				s.logger.Warn("mail watcher idle sync failed", "owner", s.ownerName(group.ownerID), "mailboxes", len(group.mailboxes), "err", syncErr)
+			}
+		})
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil && s.logger != nil {
+			s.logger.Warn("mail watcher idle disconnected", "owner", s.ownerName(group.ownerID), "mailboxes", len(group.mailboxes), "err", err)
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		if backoff < 15*time.Second {
+			backoff *= 2
 		}
 	}
 }
@@ -2650,6 +2754,66 @@ func (s *Server) mailWatcherGroups() []mailboxWatcherOwnerGroup {
 	return groups
 }
 
+func (s *Server) mailWatcherIMAPGroups() []mailboxWatcherIMAPGroup {
+	state := s.store.Snapshot()
+	type bucket struct {
+		ownerID   string
+		state     LoginState
+		mailboxes []Mailbox
+	}
+	buckets := make(map[string]*bucket)
+	for _, mailbox := range state.Mailboxes {
+		if !mailbox.APIActive || !mailbox.ICloudActive || mailbox.Status == StatusDisabled {
+			continue
+		}
+		ownerID := strings.TrimSpace(mailbox.OwnerID)
+		imapState, ok := s.imapStateForMailbox(ownerID, mailbox)
+		if !ok {
+			continue
+		}
+		key := ownerID + "|" + imapStateKey(imapState)
+		item := buckets[key]
+		if item == nil {
+			item = &bucket{ownerID: ownerID, state: imapState}
+			buckets[key] = item
+		}
+		item.mailboxes = append(item.mailboxes, mailbox)
+	}
+	keys := make([]string, 0, len(buckets))
+	for key := range buckets {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	groups := make([]mailboxWatcherIMAPGroup, 0, len(keys))
+	for _, key := range keys {
+		item := buckets[key]
+		sort.Slice(item.mailboxes, func(i, j int) bool {
+			return item.mailboxes[i].Email < item.mailboxes[j].Email
+		})
+		groups = append(groups, mailboxWatcherIMAPGroup{
+			key:       key,
+			ownerID:   item.ownerID,
+			state:     item.state,
+			mailboxes: item.mailboxes,
+			signature: mailWatcherIMAPGroupSignature(item.state, item.mailboxes),
+		})
+	}
+	return groups
+}
+
+func mailWatcherIMAPGroupSignature(state LoginState, mailboxes []Mailbox) string {
+	parts := []string{
+		normalizeICloudIMAPEmail(state.IMAPEmail),
+		strings.TrimSpace(state.IMAPUsername),
+		state.IMAPHost,
+		strconv.Itoa(state.IMAPPort),
+	}
+	for _, mailbox := range mailboxes {
+		parts = append(parts, strings.TrimSpace(mailbox.ID), normalizeICloudIMAPEmail(mailbox.Email))
+	}
+	return strings.Join(parts, "|")
+}
+
 func (s *Server) syncMailbox(ctx context.Context, mailbox Mailbox, after time.Time, keyword string) (int, error) {
 	return s.syncMailboxCodeBatchForOwnerWithLimit(ctx, mailbox.OwnerID, []Mailbox{mailbox}, after, keyword, mailboxSyncThreadLimit(mailbox))
 }
@@ -2680,25 +2844,36 @@ func (s *Server) syncMailboxCodeBatchForOwnerWithLimit(ctx context.Context, owne
 	}
 	defer s.markMailboxSyncFinished(ownerID)
 
-	syncFn := s.syncCodeMailboxBatch
+	syncFn := s.syncCodeMailboxBatchWithCursor
+	if syncFn == nil && s.syncCodeMailboxBatch != nil {
+		syncFn = func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (iCloudIMAPSyncResult, error) {
+			messagesByMailbox, err := s.syncCodeMailboxBatch(ctx, state, mailboxes, after, keyword, maxMessages)
+			return iCloudIMAPSyncResult{
+				MessagesByMailbox: messagesByMailbox,
+				LastUID:           highestICloudMessageUID(messagesByMailbox),
+			}, err
+		}
+	}
 	if syncFn == nil {
-		syncFn = SyncICloudIMAPMessages
+		syncFn = SyncICloudIMAPMessagesWithCursor
 	}
 	type imapGroup struct {
+		session   ICloudSession
 		state     LoginState
 		mailboxes []Mailbox
 	}
 	groups := make(map[string]*imapGroup)
 	order := make([]string, 0)
+	resolver := s.imapSessionResolverForOwner(ownerID)
 	for _, mailbox := range refreshed {
-		state, ok := s.imapStateForMailbox(ownerID, mailbox)
+		session, state, ok := resolver.sessionForMailbox(mailbox)
 		if !ok {
 			return 0, errCode("imap_session_missing", "未保存取码登录，请先保存 iCloud 邮箱账号和 App 专用密码", true)
 		}
-		key := imapStateKey(state)
+		key := firstNonEmpty(strings.TrimSpace(session.AccountID), "__imap__") + "|" + imapStateKey(state)
 		group := groups[key]
 		if group == nil {
-			group = &imapGroup{state: state}
+			group = &imapGroup{session: session, state: state}
 			groups[key] = group
 			order = append(order, key)
 		}
@@ -2708,10 +2883,15 @@ func (s *Server) syncMailboxCodeBatchForOwnerWithLimit(ctx context.Context, owne
 	synced := 0
 	for _, key := range order {
 		group := groups[key]
-		messagesByMailbox, err := syncFn(ctx, group.state, group.mailboxes, after, keyword, maxMessages)
+		syncResult, err := syncFn(ctx, group.state, group.mailboxes, after, keyword, maxMessages)
 		if err != nil {
 			return synced, err
 		}
+		messagesByMailbox := syncResult.MessagesByMailbox
+		if messagesByMailbox == nil {
+			messagesByMailbox = map[string][]ICloudSyncedMessage{}
+		}
+		lastAccountUID := firstNonEmpty(syncResult.LastUID, highestICloudMessageUID(messagesByMailbox))
 		for _, mailbox := range group.mailboxes {
 			lastSyncUID := mailbox.LastSyncUID
 			latestMessageAt := mailbox.LastSyncAt
@@ -2738,6 +2918,9 @@ func (s *Server) syncMailboxCodeBatchForOwnerWithLimit(ctx context.Context, owne
 			if _, err := s.store.SetMailboxSyncCursor(mailbox.ID, now, lastSyncUID); err != nil {
 				return synced, err
 			}
+		}
+		if _, err := s.store.SetICloudIMAPSyncCursor(ownerID, group.session.AccountID, imapStateKey(group.state), now, lastAccountUID); err != nil {
+			return synced, err
 		}
 	}
 	return synced, nil
@@ -2831,6 +3014,22 @@ func (s *Server) syncMailboxBatchForOwnerWithLimit(ctx context.Context, ownerID 
 		}
 	}
 	return nil
+}
+
+func highestICloudMessageUID(messagesByMailbox map[string][]ICloudSyncedMessage) string {
+	highest := 0
+	for _, messages := range messagesByMailbox {
+		for _, msg := range messages {
+			uid := imapUIDNumber(firstNonEmpty(msg.UID, msg.RemoteID))
+			if uid > highest {
+				highest = uid
+			}
+		}
+	}
+	if highest <= 0 {
+		return ""
+	}
+	return strconv.Itoa(highest)
 }
 
 func icloudRemoteIDsFromMessages(messages []Message) []string {
@@ -3386,22 +3585,74 @@ func (s *Server) sessionForMailbox(ownerID, accountID string) (ICloudSession, bo
 	return ICloudSession{}, false
 }
 
-func (s *Server) imapStateForMailbox(ownerID string, mailbox Mailbox) (LoginState, bool) {
+func (s *Server) imapSessionForMailbox(ownerID string, mailbox Mailbox) (ICloudSession, LoginState, bool) {
 	if session, ok := s.sessionForOwnerAccount(ownerID, mailbox.AccountID); ok {
 		if state, ok := iCloudIMAPLoginState(session); ok {
-			return state, true
+			return session, state, true
 		}
 	}
-	var found []LoginState
+	type match struct {
+		session ICloudSession
+		state   LoginState
+	}
+	var found []match
 	for _, session := range s.sessionsForOwner(ownerID, "") {
 		if state, ok := iCloudIMAPLoginState(session); ok {
-			found = append(found, state)
+			found = append(found, match{session: session, state: state})
 		}
 	}
 	if len(found) == 1 {
-		return found[0], true
+		return found[0].session, found[0].state, true
 	}
-	return LoginState{}, false
+	return ICloudSession{}, LoginState{}, false
+}
+
+func (s *Server) imapStateForMailbox(ownerID string, mailbox Mailbox) (LoginState, bool) {
+	_, state, ok := s.imapSessionForMailbox(ownerID, mailbox)
+	return state, ok
+}
+
+type imapSessionResolver struct {
+	byAccount map[string]imapSessionMatch
+	single    imapSessionMatch
+	hasSingle bool
+}
+
+type imapSessionMatch struct {
+	session ICloudSession
+	state   LoginState
+}
+
+func (s *Server) imapSessionResolverForOwner(ownerID string) imapSessionResolver {
+	sessions := s.sessionsForOwner(ownerID, "")
+	resolver := imapSessionResolver{byAccount: make(map[string]imapSessionMatch, len(sessions))}
+	matches := make([]imapSessionMatch, 0, len(sessions))
+	for _, session := range sessions {
+		state, ok := iCloudIMAPLoginState(session)
+		if !ok {
+			continue
+		}
+		match := imapSessionMatch{session: session, state: state}
+		if accountID := strings.TrimSpace(session.AccountID); accountID != "" {
+			resolver.byAccount[accountID] = match
+		}
+		matches = append(matches, match)
+	}
+	if len(matches) == 1 {
+		resolver.single = matches[0]
+		resolver.hasSingle = true
+	}
+	return resolver
+}
+
+func (r imapSessionResolver) sessionForMailbox(mailbox Mailbox) (ICloudSession, LoginState, bool) {
+	if match, ok := r.byAccount[strings.TrimSpace(mailbox.AccountID)]; ok {
+		return match.session, match.state, true
+	}
+	if r.hasSingle {
+		return r.single.session, r.single.state, true
+	}
+	return ICloudSession{}, LoginState{}, false
 }
 
 func imapStateKey(state LoginState) string {

@@ -144,6 +144,8 @@ type LoginState struct {
 	IMAPHost          string          `json:"imap_host,omitempty"`
 	IMAPPort          int             `json:"imap_port,omitempty"`
 	IMAPAppPassword   string          `json:"imap_app_password,omitempty"`
+	IMAPLastSyncAt    time.Time       `json:"imap_last_sync_at,omitempty"`
+	IMAPLastSyncUID   string          `json:"imap_last_sync_uid,omitempty"`
 	ManageExpiresAt   time.Time       `json:"manage_expires_at,omitempty"`
 	LastCheckedAt     time.Time       `json:"last_checked_at,omitempty"`
 	LastCheckOK       bool            `json:"last_check_ok,omitempty"`
