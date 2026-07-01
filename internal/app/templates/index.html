@@ -2854,7 +2854,6 @@
       try {
         const url = mailboxCodeURL(row, {
           waitMs: 12000,
-          after: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
           peek: true
         });
         const res = await fetch(url.toString());

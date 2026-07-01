@@ -3336,6 +3336,98 @@ func TestMailboxCodeQueryWaitMSWaitsForSyncResult(t *testing.T) {
 	}
 }
 
+func TestMailboxCodeQueryReturnsCodeInsertedDuringWaitTimeout(t *testing.T) {
+	oldInterval := mailboxMailSyncMinInterval
+	mailboxMailSyncMinInterval = 0
+	t.Cleanup(func() { mailboxMailSyncMinInterval = oldInterval })
+	oldDebounce := mailboxCodePollDebounce
+	mailboxCodePollDebounce = 0
+	t.Cleanup(func() { mailboxCodePollDebounce = oldDebounce })
+	oldLocalPoll := mailboxCodeLocalPollInterval
+	mailboxCodeLocalPollInterval = 5 * time.Millisecond
+	t.Cleanup(func() { mailboxCodeLocalPollInterval = oldLocalPoll })
+
+	store := newTestStore(t)
+	ownerID := "owner-code-timeout-cache"
+	if err := store.SaveICloudSessionForOwner(ownerID, testIMAPSession(ownerID, "", "receiver-timeout@icloud.com")); err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := store.AddMailboxForOwner(ownerID, "", "UPI-1", "timeout@icloud.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(Config{PublicFastSyncWaitMS: 20, PublicSyncMinIntervalMS: 1}, store, discardLogger())
+	server := handler.(*Server)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	syncDone := make(chan struct{})
+	insertDone := make(chan struct{})
+	var startedOnce sync.Once
+	server.syncCodeMailboxBatch = func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (map[string][]ICloudSyncedMessage, error) {
+		defer close(syncDone)
+		startedOnce.Do(func() { close(started) })
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return map[string][]ICloudSyncedMessage{}, nil
+	}
+
+	go func() {
+		defer close(insertDone)
+		<-started
+		time.Sleep(20 * time.Millisecond)
+		_, _ = store.AddMessage(mailbox.ID, "ChatGPT code", "noreply@example.com", "Use 909090 to continue.", time.Now())
+	}()
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mailboxes/"+url.PathEscape(mailbox.Email)+"/code?key="+mailbox.APIToken+"&keyword=ChatGPT&wait_ms=500&peek=1", nil)
+	start := time.Now()
+	handler.ServeHTTP(rr, req)
+	elapsed := time.Since(start)
+	close(release)
+	select {
+	case <-syncDone:
+	case <-time.After(time.Second):
+		t.Fatal("background sync did not finish")
+	}
+	select {
+	case <-insertDone:
+	case <-time.After(time.Second):
+		t.Fatal("message insert did not finish")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		server.mailboxCodeMu.Lock()
+		pollers := len(server.mailboxCodePollers)
+		server.mailboxCodeMu.Unlock()
+		if pollers == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("mailbox code poller still active")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code request = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Success bool   `json:"success"`
+		Code    string `json:"code"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Success || body.Code != "909090" {
+		t.Fatalf("code body = %+v, want code inserted while poller was still waiting", body)
+	}
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("code request took %v, want local insert to be observed before wait_ms timeout", elapsed)
+	}
+}
+
 func TestMailboxCodeQueryDoesNotRepeatServedCachedCode(t *testing.T) {
 	oldInterval := mailboxMailSyncMinInterval
 	mailboxMailSyncMinInterval = 0

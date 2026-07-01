@@ -32,6 +32,7 @@ const mailboxListMaxPageSize = 500
 var mailboxMailSyncMinInterval = 3 * time.Second
 var mailboxCodeFastWait = 600 * time.Millisecond
 var mailboxCodePollDebounce = 100 * time.Millisecond
+var mailboxCodeLocalPollInterval = 100 * time.Millisecond
 var mailboxCodeBatchSyncTimeout = 120 * time.Second
 var mailboxCodeMaxClientWait = 30 * time.Second
 var mailWatcherPollInterval = 3 * time.Second
@@ -2250,6 +2251,10 @@ func (s *Server) writeMailboxCode(w http.ResponseWriter, r *http.Request, mailbo
 		s.writeMailboxCodeSuccess(w, mailbox, result.message, result.code, staleCacheMessage(result.syncErr), !peekOnly)
 		return
 	}
+	if msg, code, ok := latestMailboxCodeSkipping(s.store.MessagesForMailbox(mailbox.ID), codeAfter, keyword, time.Now(), skipMessageID); ok {
+		s.writeMailboxCodeSuccess(w, mailbox, msg, code, staleCacheMessage(result.syncErr), !peekOnly)
+		return
+	}
 	if result.syncErr != nil && allowStale {
 		if msg, code, ok := latestMailboxCodeSkipping(s.store.MessagesForMailbox(mailbox.ID), codeAfter, keyword, time.Now(), skipMessageID); ok {
 			s.writeMailboxCodeSuccess(w, mailbox, msg, code, "取码同步失败，当前验证码来自本地缓存", !peekOnly)
@@ -2402,13 +2407,36 @@ func (s *Server) waitMailboxCode(ctx context.Context, mailbox Mailbox, after tim
 		timeout = timer.C
 		defer timer.Stop()
 	}
-	select {
-	case result := <-waiter.result:
-		return result
-	case <-timeout:
-		return mailboxCodeResult{}
-	case <-requestDone:
-		return mailboxCodeResult{syncErr: ctx.Err()}
+	var localTick <-chan time.Time
+	var localTicker *time.Ticker
+	if waitDuration > 0 {
+		interval := mailboxCodeLocalPollInterval
+		if interval <= 0 {
+			interval = 100 * time.Millisecond
+		}
+		if interval > waitDuration {
+			interval = waitDuration
+		}
+		localTicker = time.NewTicker(interval)
+		localTick = localTicker.C
+		defer localTicker.Stop()
+	}
+	for {
+		select {
+		case result := <-waiter.result:
+			return result
+		case <-localTick:
+			if msg, code, ok := s.latestMailboxCodeForWaiter(waiter); ok {
+				return mailboxCodeResult{message: msg, code: code, ok: true}
+			}
+		case <-timeout:
+			if msg, code, ok := s.latestMailboxCodeForWaiter(waiter); ok {
+				return mailboxCodeResult{message: msg, code: code, ok: true}
+			}
+			return mailboxCodeResult{}
+		case <-requestDone:
+			return mailboxCodeResult{syncErr: ctx.Err()}
+		}
 	}
 }
 
