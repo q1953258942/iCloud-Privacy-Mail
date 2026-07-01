@@ -632,6 +632,50 @@ func SyncICloudIMAPMessages(ctx context.Context, state LoginState, mailboxes []M
 	return result.MessagesByMailbox, nil
 }
 
+func LatestICloudIMAPUID(ctx context.Context, state LoginState) (string, error) {
+	state, err := normalizeICloudIMAPState(state)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	conn, err := dialICloudIMAPTLS(ctx, state.IMAPHost, state.IMAPPort)
+	if err != nil {
+		return "", errCode("imap_connect_failed", "连接 iCloud IMAP 失败："+err.Error(), true)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+
+	reader := bufio.NewReader(conn)
+	greeting, err := reader.ReadString('\n')
+	if err != nil {
+		return "", errCode("imap_greeting_failed", "读取 iCloud IMAP 欢迎信息失败："+err.Error(), true)
+	}
+	if !strings.Contains(strings.ToUpper(greeting), "OK") {
+		return "", errCode("imap_greeting_failed", "iCloud IMAP 未就绪："+imapResponseSummary([]string{greeting}), true)
+	}
+	loginLines, err := imapCommand(conn, reader, "A001", "LOGIN "+imapQuote(state.IMAPUsername)+" "+imapQuote(state.IMAPAppPassword))
+	if err != nil {
+		return "", errCode("imap_login_failed", "iCloud IMAP 登录请求失败："+err.Error(), true)
+	}
+	if !imapTaggedOK(loginLines, "A001") {
+		return "", errCode("imap_login_failed", "iCloud IMAP 登录失败，请确认 iCloud 邮箱账号和 App 专用密码："+imapResponseSummary(loginLines), false)
+	}
+	selectLines, err := imapCommand(conn, reader, "A002", "SELECT INBOX")
+	if err != nil {
+		return "", errCode("imap_select_failed", "打开 iCloud 收件箱失败："+err.Error(), true)
+	}
+	if !imapTaggedOK(selectLines, "A002") {
+		return "", errCode("imap_select_failed", "打开 iCloud 收件箱失败："+imapResponseSummary(selectLines), true)
+	}
+	_, _ = imapCommand(conn, reader, "A003", "LOGOUT")
+	uid := imapSelectLastUID(selectLines)
+	if uid <= 0 {
+		return "", nil
+	}
+	return strconv.Itoa(uid), nil
+}
+
 func SyncICloudIMAPMessagesWithCursor(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (iCloudIMAPSyncResult, error) {
 	state, err := normalizeICloudIMAPState(state)
 	if err != nil {
@@ -750,6 +794,28 @@ func imapSearchCommand(state LoginState, mailboxes []Mailbox, after time.Time) s
 		searchAfter = time.Now().Add(-24 * time.Hour)
 	}
 	return "UID SEARCH SINCE " + searchAfter.Format("2-Jan-2006")
+}
+
+func imapSelectLastUID(lines []string) int {
+	for _, line := range lines {
+		upper := strings.ToUpper(line)
+		idx := strings.Index(upper, "UIDNEXT")
+		if idx < 0 {
+			continue
+		}
+		tail := line[idx+len("UIDNEXT"):]
+		fields := strings.FieldsFunc(tail, func(r rune) bool {
+			return r < '0' || r > '9'
+		})
+		if len(fields) == 0 {
+			continue
+		}
+		nextUID, err := strconv.Atoi(fields[0])
+		if err == nil && nextUID > 1 {
+			return nextUID - 1
+		}
+	}
+	return 0
 }
 
 func imapUIDNumber(value string) int {

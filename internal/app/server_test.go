@@ -3803,6 +3803,103 @@ func TestSyncMailboxCodeBatchStoresIMAPAccountCursor(t *testing.T) {
 	}
 }
 
+func TestSyncMailboxCodeBatchSkipsEmptyMailboxCursorWrites(t *testing.T) {
+	oldInterval := mailboxMailSyncMinInterval
+	mailboxMailSyncMinInterval = 0
+	t.Cleanup(func() { mailboxMailSyncMinInterval = oldInterval })
+
+	store := newTestStore(t)
+	ownerID := "owner-imap-empty-cursor"
+	accountID := "acc-imap-empty-cursor"
+	if err := store.SaveICloudSessionForOwner(ownerID, testIMAPSession(ownerID, accountID, "empty-owner@icloud.com")); err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := store.AddMailboxForOwner(ownerID, accountID, "empty", "empty.alias@icloud.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewServer(Config{}, store, discardLogger())
+	server := handler.(*Server)
+	server.syncCodeMailboxBatchWithCursor = func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (iCloudIMAPSyncResult, error) {
+		return iCloudIMAPSyncResult{
+			LastUID:           "999",
+			MessagesByMailbox: map[string][]ICloudSyncedMessage{},
+		}, nil
+	}
+
+	if _, err := server.syncMailbox(context.Background(), mailbox, time.Time{}, "ChatGPT"); err != nil {
+		t.Fatal(err)
+	}
+	updated, ok := store.FindMailboxByID(mailbox.ID)
+	if !ok {
+		t.Fatal("mailbox not found")
+	}
+	if !updated.LastSyncAt.IsZero() {
+		t.Fatalf("LastSyncAt = %s, want zero for empty mailbox sync", updated.LastSyncAt)
+	}
+	session, ok := store.ICloudSessionForOwnerAccount(ownerID, accountID)
+	if !ok {
+		t.Fatal("session not found")
+	}
+	state, ok := iCloudIMAPLoginState(session)
+	if !ok {
+		t.Fatalf("imap state missing: %+v", session)
+	}
+	if state.IMAPLastSyncUID != "999" {
+		t.Fatalf("IMAPLastSyncUID = %q, want 999", state.IMAPLastSyncUID)
+	}
+}
+
+func TestEnsureMailWatcherIMAPBaselineStoresAccountUID(t *testing.T) {
+	store := newTestStore(t)
+	ownerID := "owner-imap-baseline"
+	accountID := "acc-imap-baseline"
+	if err := store.SaveICloudSessionForOwner(ownerID, testIMAPSession(ownerID, accountID, "baseline-owner@icloud.com")); err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := store.AddMailboxForOwner(ownerID, accountID, "baseline", "baseline.alias@icloud.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewServer(Config{}, store, discardLogger())
+	server := handler.(*Server)
+	var calls int
+	server.latestIMAPUID = func(ctx context.Context, state LoginState) (string, error) {
+		calls++
+		return "500", nil
+	}
+	groups := server.mailWatcherIMAPGroups()
+	if len(groups) != 1 {
+		t.Fatalf("IMAP groups = %d, want 1", len(groups))
+	}
+	if err := server.ensureMailWatcherIMAPBaseline(context.Background(), groups[0]); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("latest IMAP UID calls = %d, want 1", calls)
+	}
+	session, ok := store.ICloudSessionForOwnerAccount(ownerID, accountID)
+	if !ok {
+		t.Fatal("session not found")
+	}
+	state, ok := iCloudIMAPLoginState(session)
+	if !ok {
+		t.Fatal("imap state missing")
+	}
+	if state.IMAPLastSyncUID != "500" {
+		t.Fatalf("IMAPLastSyncUID = %q, want 500", state.IMAPLastSyncUID)
+	}
+	updated, ok := store.FindMailboxByID(mailbox.ID)
+	if !ok {
+		t.Fatal("mailbox not found")
+	}
+	if !updated.LastSyncAt.IsZero() || updated.LastSyncUID != "" {
+		t.Fatalf("mailbox cursor changed: LastSyncAt=%s LastSyncUID=%q", updated.LastSyncAt, updated.LastSyncUID)
+	}
+}
+
 func TestMailWatcherIMAPGroupSignatureIgnoresMailboxSyncCursor(t *testing.T) {
 	state := LoginState{
 		Kind:            LoginStateICloudIMAP,

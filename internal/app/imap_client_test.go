@@ -166,6 +166,18 @@ func TestIMAPSearchCommandPrefersAccountCursor(t *testing.T) {
 	}
 }
 
+func TestIMAPSelectUIDNextLastUID(t *testing.T) {
+	lines := []string{
+		"* 652 EXISTS",
+		"* OK [UIDVALIDITY 1] UIDs valid",
+		"* OK [UIDNEXT 88291] Predicted next UID",
+		"A002 OK [READ-WRITE] SELECT completed",
+	}
+	if got := imapSelectLastUID(lines); got != 88290 {
+		t.Fatalf("imapSelectLastUID() = %d, want 88290", got)
+	}
+}
+
 func TestIMAPSearchCommandFallsBackToSinceWhenCursorMissing(t *testing.T) {
 	after := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 	command := imapSearchCommand(LoginState{}, []Mailbox{

@@ -78,6 +78,7 @@ type Server struct {
 	syncMailboxBatch               func(ctx context.Context, session ICloudSession, mailboxes []Mailbox, after time.Time, keyword string, maxThreads int) (map[string][]ICloudSyncedMessage, error)
 	syncCodeMailboxBatch           func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (map[string][]ICloudSyncedMessage, error)
 	syncCodeMailboxBatchWithCursor func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (iCloudIMAPSyncResult, error)
+	latestIMAPUID                  func(ctx context.Context, state LoginState) (string, error)
 	checkIMAPLogin                 func(ctx context.Context, email, appPassword string) error
 }
 
@@ -2555,7 +2556,6 @@ func (s *Server) runMailWatcher(ctx context.Context) {
 		s.mailWatcherMu.Unlock()
 	}()
 
-	s.syncMailWatcherRound(ctx, true)
 	idleWorkers := make(map[string]mailboxWatcherIdleWorker)
 	stopIdleWorkers := func() {
 		for key, worker := range idleWorkers {
@@ -2565,6 +2565,7 @@ func (s *Server) runMailWatcher(ctx context.Context) {
 	}
 	defer stopIdleWorkers()
 	s.ensureMailWatcherIdleWorkers(ctx, idleWorkers)
+	s.syncMailWatcherRound(ctx, false)
 	interval := s.mailWatcherInterval
 	if interval <= 0 {
 		interval = mailWatcherPollInterval
@@ -2596,6 +2597,12 @@ func (s *Server) ensureMailWatcherIdleWorkers(ctx context.Context, workers map[s
 		if worker, ok := workers[group.key]; ok {
 			worker.cancel()
 		}
+		if err := s.ensureMailWatcherIMAPBaseline(ctx, group); err != nil {
+			if s.logger != nil {
+				s.logger.Warn("mail watcher imap baseline failed", "owner", s.ownerName(group.ownerID), "mailboxes", len(group.mailboxes), "err", err)
+			}
+			continue
+		}
 		workerCtx, cancel := context.WithCancel(ctx)
 		workers[group.key] = mailboxWatcherIdleWorker{cancel: cancel, signature: group.signature}
 		go s.runMailWatcherIdleWorker(workerCtx, group)
@@ -2607,6 +2614,37 @@ func (s *Server) ensureMailWatcherIdleWorkers(ctx context.Context, workers map[s
 		worker.cancel()
 		delete(workers, key)
 	}
+}
+
+func (s *Server) ensureMailWatcherIMAPBaseline(ctx context.Context, group mailboxWatcherIMAPGroup) error {
+	if imapUIDNumber(group.state.IMAPLastSyncUID) > 0 {
+		return nil
+	}
+	latestFn := s.latestIMAPUID
+	if latestFn == nil {
+		latestFn = LatestICloudIMAPUID
+	}
+	uid, err := latestFn(ctx, group.state)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(uid) == "" {
+		return nil
+	}
+	accountID := ""
+	resolver := s.imapSessionResolverForOwner(group.ownerID)
+	for _, mailbox := range group.mailboxes {
+		session, state, ok := resolver.sessionForMailbox(mailbox)
+		if !ok || imapStateKey(state) != imapStateKey(group.state) {
+			continue
+		}
+		accountID = strings.TrimSpace(session.AccountID)
+		break
+	}
+	if _, err := s.store.SetICloudIMAPSyncCursor(group.ownerID, accountID, imapStateKey(group.state), time.Now(), uid); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Server) runMailWatcherIdleWorker(ctx context.Context, group mailboxWatcherIMAPGroup) {
@@ -2895,6 +2933,7 @@ func (s *Server) syncMailboxCodeBatchForOwnerWithLimit(ctx context.Context, owne
 		for _, mailbox := range group.mailboxes {
 			lastSyncUID := mailbox.LastSyncUID
 			latestMessageAt := mailbox.LastSyncAt
+			mailboxChanged := false
 			for _, msg := range messagesByMailbox[mailbox.ID] {
 				if extractOTP(msg.Subject+"\n"+msg.Body) == "" {
 					continue
@@ -2909,14 +2948,26 @@ func (s *Server) syncMailboxCodeBatchForOwnerWithLimit(ctx context.Context, owne
 				}
 				if created {
 					synced++
+					mailboxChanged = true
 				}
+				candidateUID := firstNonEmpty(msg.UID, remoteID)
 				if msg.ReceivedAt.After(latestMessageAt) {
 					latestMessageAt = msg.ReceivedAt
-					lastSyncUID = firstNonEmpty(msg.UID, remoteID)
+					lastSyncUID = candidateUID
+					mailboxChanged = true
+				} else if strings.TrimSpace(lastSyncUID) == "" && strings.TrimSpace(candidateUID) != "" {
+					lastSyncUID = candidateUID
+					mailboxChanged = true
 				}
 			}
-			if _, err := s.store.SetMailboxSyncCursor(mailbox.ID, now, lastSyncUID); err != nil {
-				return synced, err
+			if mailboxChanged {
+				syncedAt := latestMessageAt
+				if syncedAt.IsZero() {
+					syncedAt = now
+				}
+				if _, err := s.store.SetMailboxSyncCursor(mailbox.ID, syncedAt, lastSyncUID); err != nil {
+					return synced, err
+				}
 			}
 		}
 		if _, err := s.store.SetICloudIMAPSyncCursor(ownerID, group.session.AccountID, imapStateKey(group.state), now, lastAccountUID); err != nil {

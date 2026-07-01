@@ -172,7 +172,7 @@ http://127.0.0.1:8787/login
 
 - 面板可手动点击 `同步邮件`。
 - 服务启动后会默认启用后台取码同步器；所有 `API active`、`iCloud active` 且已保存取码登录的邮箱会自动进入同步池，不需要先访问取码 API 才开始监听。
-- 后台取码同步器会为每个取码登录态维持 IMAP `IDLE` 常驻连接；iCloud 收到新邮件并推送 `EXISTS` 事件后，后端会立即按账号同步并写入本地库。
+- 后台取码同步器会为每个取码登录态维持 IMAP `IDLE` 常驻连接；监听启动时先读取当前 `UIDNEXT` 作为账号级起跑线，之后 iCloud 收到新邮件并推送 `EXISTS` 事件后，后端只同步新 UID 并写入本地库。
 - 同步时优先使用取码登录态里的账号级 `IMAPLastSyncUID` 做 `UID n:*` 增量抓取；兼容旧邮箱级 `LastSyncUID`，没有 UID 游标时才按日期回看兜底。
 - IMAP 连接会优先使用 TCP 公共 DNS，并以 UDP DNS、本机 resolver 和 Apple IMAP IPv4 直连兜底，减少服务器 resolver 或 DNS 53 端口偶发超时导致验证码不能及时入库的问题；直连仍使用 `imap.mail.me.com` 做 TLS SNI。
 - 后台同步默认 3 秒一轮作为兜底；最近被取码 API 访问过的邮箱会被排到本轮前面并立即唤醒同步器，避免 IMAP 事件漏掉或连接被 Apple 断开后长时间不入库。
@@ -213,8 +213,8 @@ GET /api/mailboxes/{id}/code?key=<mailbox_key>&after=<RFC3339>&keyword=OpenAI
 | `mail_watcher_enabled` / `MAIL_WATCHER_ENABLED` | `true` | 是否启用后台取码同步器 |
 | `mail_watcher_poll_ms` / `MAIL_WATCHER_POLL_MS` | `3000` | 后台取码同步器轮询间隔 |
 | `mail_watcher_fetch_limit` / `MAIL_WATCHER_FETCH_LIMIT` | `8` | 后台同步每轮最多扫描最近多少个邮件线程 |
-| `mail_watcher_initial_fetch_limit` / `MAIL_WATCHER_INITIAL_FETCH_LIMIT` | `20` | 服务启动时预抓最近多少个邮件线程 |
-| `mail_watcher_lookback_hours` / `MAIL_WATCHER_LOOKBACK_HOURS` | `24` | 服务启动首次预抓向前回看多少小时 |
+| `mail_watcher_initial_fetch_limit` / `MAIL_WATCHER_INITIAL_FETCH_LIMIT` | `20` | 兼容旧配置；实时取码监听启动后会先保存当前 UID 起跑线，不再预抓历史邮件 |
+| `mail_watcher_lookback_hours` / `MAIL_WATCHER_LOOKBACK_HOURS` | `24` | 兼容旧配置；实时取码监听不再按时间回看旧邮件 |
 | `public_fast_sync_wait_ms` / `PUBLIC_FAST_SYNC_WAIT_MS` | `600` | 取码 API 本地未命中后，最多等待后台快速同步多久 |
 | `public_sync_min_interval_ms` / `PUBLIC_SYNC_MIN_INTERVAL_MS` | `3000` | 同一用户下 iCloud 邮件同步的最小间隔，避免前端高频轮询打满 Apple 接口 |
 
