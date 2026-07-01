@@ -275,7 +275,7 @@ func TestAppleAccountAPIErrorDoesNotTreatGenericHTTPAsAuthExpired(t *testing.T) 
 
 func TestLoadConfigPublicCodeSyncSettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"mail_watcher_enabled":false,"mail_watcher_poll_ms":2500,"mail_watcher_fetch_limit":6,"mail_watcher_initial_fetch_limit":16,"mail_watcher_lookback_hours":12,"public_fast_sync_wait_ms":250,"public_sync_min_interval_ms":1500}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"mail_watcher_enabled":false,"mail_watcher_poll_ms":2500,"mail_watcher_fetch_limit":6,"mail_watcher_initial_fetch_limit":16,"mail_watcher_lookback_hours":12,"public_fast_sync_wait_ms":250,"public_sync_min_interval_ms":1500,"apple_account_keep_alive_enabled":true,"apple_account_keep_alive_ms":123000}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := LoadConfig(path)
@@ -290,6 +290,9 @@ func TestLoadConfigPublicCodeSyncSettings(t *testing.T) {
 	}
 	if cfg.PublicFastSyncWaitMS != 250 || cfg.PublicSyncMinIntervalMS != 1500 {
 		t.Fatalf("public sync settings = fast:%d min:%d, want 250/1500", cfg.PublicFastSyncWaitMS, cfg.PublicSyncMinIntervalMS)
+	}
+	if !cfg.AppleAccountKeepAliveEnabled || cfg.AppleAccountKeepAliveMS != 123000 {
+		t.Fatalf("apple account keepalive settings = enabled:%t ms:%d, want true/123000", cfg.AppleAccountKeepAliveEnabled, cfg.AppleAccountKeepAliveMS)
 	}
 }
 
@@ -474,7 +477,7 @@ func TestPublicSessionSeparatesLoginStateKinds(t *testing.T) {
 func TestPublicSessionExposesPerLoginStateCheckStatus(t *testing.T) {
 	checkedAt := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
 	expiresAt := checkedAt.Add(15 * time.Minute)
-	got := publicSession(&ICloudSession{
+	session := ICloudSession{
 		SavedAt: time.Now(),
 		AppleID: "state@example.com",
 		LoginStates: []LoginState{
@@ -495,15 +498,78 @@ func TestPublicSessionExposesPerLoginStateCheckStatus(t *testing.T) {
 				LastStatusMessage: "旧接口登录态异常",
 			},
 		},
-	})
+	}
+	got := publicSession(&session)
 	if !got.AppleAccountLoginChecked || !got.AppleAccountLoginOK || got.AppleAccountLoginStatus != "登录态正常" {
 		t.Fatalf("apple account status = checked:%t ok:%t text:%q", got.AppleAccountLoginChecked, got.AppleAccountLoginOK, got.AppleAccountLoginStatus)
 	}
-	if got.AppleAccountManageExpiresAt != formatTime(expiresAt) || got.AppleAccountNextRefreshAt != formatTime(expiresAt.Add(-appleAccountManageRefreshSkew)) {
+	wantNext := checkedAt.Add(appleAccountKeepAliveIntervalForSession(session, appleAccountKeepAliveDefaultInterval))
+	if got.AppleAccountManageExpiresAt != formatTime(expiresAt) || got.AppleAccountNextRefreshAt != formatTime(wantNext) {
 		t.Fatalf("apple account refresh times = next:%q expires:%q", got.AppleAccountNextRefreshAt, got.AppleAccountManageExpiresAt)
 	}
 	if !got.ICloudWebLoginChecked || got.ICloudWebLoginOK || got.ICloudWebLoginStatus != "登录态异常" {
 		t.Fatalf("icloud web status = checked:%t ok:%t text:%q", got.ICloudWebLoginChecked, got.ICloudWebLoginOK, got.ICloudWebLoginStatus)
+	}
+}
+
+func TestAppleAccountKeepAliveRoundSavesUpdatedState(t *testing.T) {
+	store := newTestStore(t)
+	ownerID := "owner-keepalive"
+	account, err := store.AddAccountForOwner(ownerID, "KeepAlive", "keepalive@example.com", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := ICloudSession{
+		OwnerID:   ownerID,
+		AccountID: account.ID,
+		AppleID:   "keepalive@example.com",
+		SavedAt:   time.Now(),
+		LoginStates: []LoginState{{
+			Kind:          LoginStateAppleAccount,
+			Scnt:          "old-scnt",
+			APIKey:        "old-key",
+			LastCheckedAt: time.Now().Add(-time.Hour),
+			LastCheckOK:   true,
+		}},
+	}
+	if err := store.SaveICloudSessionForOwner(ownerID, session); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(Config{AppleAccountKeepAliveEnabled: true, AppleAccountKeepAliveMS: 1000}, store, discardLogger())
+	server, ok := handler.(*Server)
+	if !ok {
+		t.Fatalf("handler type = %T, want *Server", handler)
+	}
+	var calls int
+	server.keepAliveAppleAccountState = func(ctx context.Context, state LoginState) (LoginState, error) {
+		calls++
+		state.Scnt = "kept-scnt"
+		state.APIKey = "kept-key"
+		markAppleAccountManageOK(&state)
+		return state, nil
+	}
+
+	server.keepAliveAppleAccountRound(context.Background())
+
+	if calls != 1 {
+		t.Fatalf("keepalive calls = %d, want 1", calls)
+	}
+	got, ok := store.ICloudSessionForOwnerAccount(ownerID, account.ID)
+	if !ok {
+		t.Fatal("updated session not found")
+	}
+	state, ok := appleAccountLoginState(got)
+	if !ok || state.Scnt != "kept-scnt" || state.APIKey != "kept-key" || !state.LastCheckOK {
+		t.Fatalf("saved apple account state = %+v ok=%v, want updated keepalive state", state, ok)
+	}
+}
+
+func TestAppleAccountKeepAliveScanIntervalPollsBeforeBaseInterval(t *testing.T) {
+	if got := appleAccountKeepAliveScanInterval(4 * time.Minute); got != 30*time.Second {
+		t.Fatalf("scan interval for 4m = %s, want 30s", got)
+	}
+	if got := appleAccountKeepAliveScanInterval(12 * time.Second); got != 5*time.Second {
+		t.Fatalf("scan interval for 12s = %s, want 5s floor", got)
 	}
 }
 
@@ -1095,6 +1161,78 @@ func TestICloudClientRefreshAppleAccountManageStateUsesBootstrapTTLWhenInitialTo
 	}
 }
 
+func TestICloudClientKeepAliveAppleAccountManageStateTouchesRealManageAPI(t *testing.T) {
+	oldBaseURL := appleAccountManageBaseURL
+	defer func() { appleAccountManageBaseURL = oldBaseURL }()
+
+	var paths []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /account/manage/gs/ws/token":
+			if r.Header.Get("scnt") != "start-scnt" {
+				t.Fatalf("token scnt header = %q, want start-scnt", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "token-scnt")
+			_, _ = w.Write([]byte(`{"timeOutInterval":15}`))
+		case "GET /account/manage":
+			if r.Header.Get("scnt") != "token-scnt" {
+				t.Fatalf("manage scnt header = %q, want token-scnt", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "manage-scnt")
+			_, _ = w.Write([]byte(`{"apiKey":"fresh-key"}`))
+		case "GET /account/manage/forwardemail":
+			if r.Header.Get("X-Apple-Api-Key") != "fresh-key" {
+				t.Fatalf("forwardemail api key = %q, want fresh-key", r.Header.Get("X-Apple-Api-Key"))
+			}
+			if r.Header.Get("scnt") != "manage-scnt" {
+				t.Fatalf("forwardemail scnt header = %q, want manage-scnt", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "touch-scnt")
+			_, _ = w.Write([]byte(`{"forwardToEmail":"receiver@icloud.com"}`))
+		case "POST /v2/jslogs":
+			if r.Header.Get("X-Apple-Api-Key") != "fresh-key" {
+				t.Fatalf("jslogs api key = %q, want fresh-key", r.Header.Get("X-Apple-Api-Key"))
+			}
+			if r.Header.Get("scnt") != "touch-scnt" {
+				t.Fatalf("jslogs scnt header = %q, want touch-scnt", r.Header.Get("scnt"))
+			}
+			w.Header().Set("X-Apple-ID-Session-Id", "jslog-session")
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer ts.Close()
+	appleAccountManageBaseURL = ts.URL
+
+	now := time.Now()
+	client := &ICloudClient{client: ts.Client()}
+	state, err := client.KeepAliveAppleAccountManageState(t.Context(), LoginState{
+		Kind:      LoginStateAppleAccount,
+		Origin:    ts.URL,
+		Scnt:      "start-scnt",
+		APIKey:    "old-key",
+		SessionID: "old-session",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPaths := []string{
+		"GET /account/manage/gs/ws/token",
+		"GET /account/manage",
+		"GET /account/manage/forwardemail",
+		"POST /v2/jslogs",
+	}
+	if strings.Join(paths, "\n") != strings.Join(wantPaths, "\n") {
+		t.Fatalf("paths = %#v, want %#v", paths, wantPaths)
+	}
+	if state.APIKey != "fresh-key" || state.Scnt != "touch-scnt" || state.SessionID != "jslog-session" || !state.LastCheckOK || state.LastCheckedAt.Before(now) {
+		t.Fatalf("state = %+v, want touched real manage API state", state)
+	}
+}
+
 func TestICloudClientCreatePrivacyMailboxWithAppleAccountReusesFreshStateAfterFailedCheck(t *testing.T) {
 	oldBaseURL := appleAccountManageBaseURL
 	defer func() { appleAccountManageBaseURL = oldBaseURL }()
@@ -1377,6 +1515,20 @@ func TestCheckSavedLoginStatesChecksAppleAccountState(t *testing.T) {
 			}
 			w.Header().Set("scnt", "scnt-after-manage")
 			_, _ = w.Write([]byte(`{"apiKey":"account-key"}`))
+		case "GET /account/manage/forwardemail":
+			if r.Header.Get("X-Apple-Api-Key") != "account-key" {
+				t.Fatalf("forwardemail api key = %q, want account-key", r.Header.Get("X-Apple-Api-Key"))
+			}
+			if r.Header.Get("scnt") != "scnt-after-manage" {
+				t.Fatalf("forwardemail scnt header = %q, want scnt-after-manage", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "scnt-after-touch")
+			_, _ = w.Write([]byte(`{"forwardToEmail":"receiver@icloud.com"}`))
+		case "POST /v2/jslogs":
+			if r.Header.Get("X-Apple-Api-Key") != "account-key" {
+				t.Fatalf("jslogs api key = %q, want account-key", r.Header.Get("X-Apple-Api-Key"))
+			}
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -1400,7 +1552,7 @@ func TestCheckSavedLoginStatesChecksAppleAccountState(t *testing.T) {
 	if !found {
 		t.Fatalf("apple account state missing: %+v", session.LoginStates)
 	}
-	if state.APIKey != "account-key" || state.Scnt != "scnt-after-manage" || !state.LastCheckOK || !state.LastCheckedAt.Equal(checkedAt) || state.LastStatusMessage != "新接口登录态正常" {
+	if state.APIKey != "account-key" || state.Scnt != "scnt-after-touch" || !state.LastCheckOK || !state.LastCheckedAt.Equal(checkedAt) || state.LastStatusMessage != "新接口登录态正常" {
 		t.Fatalf("updated state = %+v", state)
 	}
 	if !session.LastCheckOK || !strings.Contains(session.LastStatusMessage, "新接口正常") {
@@ -1409,6 +1561,8 @@ func TestCheckSavedLoginStatesChecksAppleAccountState(t *testing.T) {
 	wantPaths := []string{
 		"GET /account/manage/gs/ws/token",
 		"GET /account/manage",
+		"GET /account/manage/forwardemail",
+		"POST /v2/jslogs",
 	}
 	if strings.Join(paths, "\n") != strings.Join(wantPaths, "\n") {
 		t.Fatalf("paths = %#v, want %#v", paths, wantPaths)
@@ -5008,6 +5162,108 @@ func TestSaveICloudSessionForOwnerMergesLoginStates(t *testing.T) {
 	}
 	if !hasLoginStateKind(got.LoginStates, LoginStateICloudWeb) {
 		t.Fatalf("iCloud login state missing after merge: %+v", got.LoginStates)
+	}
+}
+
+func TestSyncICloudMailboxesIsolatesSlowAccounts(t *testing.T) {
+	oldTimeout := iCloudMailboxListAccountTimeout
+	iCloudMailboxListAccountTimeout = 120 * time.Millisecond
+	defer func() { iCloudMailboxListAccountTimeout = oldTimeout }()
+
+	store := newTestStore(t)
+	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
+	cookie, user := registerTestUser(t, handler, "sync-isolate", "sync123")
+
+	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer slowServer.Close()
+	fastServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"success": true,
+			"timestamp": 1,
+			"result": {
+				"forwardToEmails": ["main@example.com"],
+				"hmeEmails": [
+					{"anonymousId":"fast1","hme":"Fast.Sync@iCloud.com","label":"FAST","isActive":true,"forwardToEmail":"main@example.com","origin":"ON_DEMAND"}
+				]
+			}
+		}`))
+	}))
+	defer fastServer.Close()
+
+	for _, session := range []ICloudSession{
+		{
+			OwnerID:            user.ID,
+			AppleID:            "slow@example.com",
+			DSID:               "slow-dsid",
+			ClientID:           "slow-client",
+			PremiumMailBaseURL: slowServer.URL,
+			Host:               "www.icloud.com",
+			Cookies:            []SessionCookie{{Name: "session", Value: "slow", Domain: "127.0.0.1", Path: "/"}},
+		},
+		{
+			OwnerID:            user.ID,
+			AppleID:            "fast@example.com",
+			DSID:               "fast-dsid",
+			ClientID:           "fast-client",
+			PremiumMailBaseURL: fastServer.URL,
+			Host:               "www.icloud.com",
+			Cookies:            []SessionCookie{{Name: "session", Value: "fast", Domain: "127.0.0.1", Path: "/"}},
+		},
+	} {
+		if err := store.SaveICloudSessionForOwner(user.ID, session); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/icloud/mailboxes/sync", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	started := time.Now()
+	handler.ServeHTTP(rr, req)
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("sync took %s, want isolated timeout under 1s", elapsed)
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("sync = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var data struct {
+		Success   bool                      `json:"success"`
+		Total     int                       `json:"total"`
+		Created   int                       `json:"created"`
+		Failed    int                       `json:"failed"`
+		Results   []syncICloudMailboxResult `json:"results"`
+		Mailboxes []publicMailbox           `json:"mailboxes"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &data); err != nil {
+		t.Fatal(err)
+	}
+	if !data.Success || data.Total != 1 || data.Created != 1 || data.Failed != 1 {
+		t.Fatalf("response = %+v", data)
+	}
+	if len(data.Mailboxes) != 1 || data.Mailboxes[0].Email != "fast.sync@icloud.com" {
+		t.Fatalf("mailboxes = %+v", data.Mailboxes)
+	}
+	if len(data.Results) != 2 {
+		t.Fatalf("results len = %d, want 2", len(data.Results))
+	}
+	var sawTimeout, sawFast bool
+	for _, result := range data.Results {
+		if result.AppleID == "slow@example.com" && !strings.Contains(result.Error, "超时") {
+			t.Fatalf("slow result = %+v, want timeout error", result)
+		}
+		if result.AppleID == "slow@example.com" {
+			sawTimeout = true
+		}
+		if result.AppleID == "fast@example.com" && result.Created == 1 && result.Source == string(mailboxCreateChannelICloudWeb) {
+			sawFast = true
+		}
+	}
+	if !sawTimeout || !sawFast {
+		t.Fatalf("results = %+v, want timeout and fast success", data.Results)
 	}
 }
 

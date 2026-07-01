@@ -1335,9 +1335,6 @@
     let sessionCheckInFlight = false;
     let schedulerPollTimer = null;
     let manageRefreshClockTimer = null;
-    let manageRefreshStatusInFlight = false;
-    const manageRefreshAutoIntervalMs = 3000;
-    const manageRefreshStatusRequested = new Set();
     let lastSchedulerCreatedEventID = 0;
     let createAccountSelectionTouched = false;
     let selectedCreateAccountIDs = new Set();
@@ -1660,7 +1657,7 @@
       const date = parseTimeValue(value);
       if (!date) return '待检测';
       const diff = date.getTime() - Date.now();
-      if (diff <= 0) return '待自动刷新';
+      if (diff <= 0) return '等待保活';
       const totalSeconds = Math.ceil(diff / 1000);
       const hours = Math.floor(totalSeconds / 3600);
       const minutes = Math.floor((totalSeconds % 3600) / 60);
@@ -1671,13 +1668,11 @@
 
     function updateManageRefreshClocks() {
       document.querySelectorAll('.manage-refresh-clock').forEach(node => {
-        const accountID = node.dataset.accountId || '';
         const refreshAt = node.dataset.refreshAt || '';
         const text = manageRefreshText(refreshAt);
-        node.textContent = `新接口刷新：${text}`;
-        const due = !!refreshAt && text === '待自动刷新';
+        node.textContent = `新接口保活：${text}`;
+        const due = !!refreshAt && text === '等待保活';
         node.classList.toggle('due', due);
-        if (due && node.dataset.loginOk === '1') scheduleManageRefreshStatusRefresh(accountID, refreshAt);
       });
     }
 
@@ -1686,53 +1681,15 @@
       manageRefreshClockTimer = setInterval(updateManageRefreshClocks, 1000);
     }
 
-    function scheduleManageRefreshStatusRefresh(accountID, refreshAt) {
-      if (!refreshAt || manageRefreshStatusInFlight) return;
-      const requestKey = `${accountID || 'account'}|${refreshAt}`;
-      if (manageRefreshStatusRequested.has(requestKey)) return;
-      manageRefreshStatusRequested.add(requestKey);
-      manageRefreshStatusInFlight = true;
-      setTimeout(() => {
-        checkICloudSession({auto: true, source: 'manage_refresh'})
-          .then(ok => {
-            if (!ok || sessionsNeedRefreshTimeRetry(lastICloudSessions)) manageRefreshStatusRequested.delete(requestKey);
-          })
-          .catch(err => {
-            manageRefreshStatusRequested.delete(requestKey);
-            log('新接口刷新时间自动更新失败：' + err.message);
-          })
-          .finally(() => {
-            manageRefreshStatusInFlight = false;
-            updateManageRefreshClocks();
-          });
-      }, manageRefreshAutoIntervalMs);
-    }
-
-    function appleAccountNeedsRefreshTimeRetry(session) {
-      const refreshAt = parseTimeValue(session && session.apple_account_next_refresh_at || '');
-      return appleAccountLoginSaved(session) &&
-        !!session.apple_account_login_checked &&
-        !!session.apple_account_login_ok &&
-        (!refreshAt || refreshAt.getTime() <= Date.now());
-    }
-
-    function sessionsNeedRefreshTimeRetry(sessions) {
-      return (sessions || []).some(appleAccountNeedsRefreshTimeRetry);
-    }
-
-    function waitForManageRefreshRetryDelay() {
-      return new Promise(resolve => setTimeout(resolve, manageRefreshAutoIntervalMs));
-    }
-
     function sessionManageRefreshBadge(session) {
       if (!appleAccountLoginSaved(session)) return '';
       const refreshAt = session.apple_account_next_refresh_at || '';
       const expiresAt = session.apple_account_manage_expires_at || '';
       const loginOK = session.apple_account_login_checked && session.apple_account_login_ok ? '1' : '0';
       const title = refreshAt
-        ? `下次刷新：${exactTimeText(refreshAt)}${expiresAt ? `；登录态到期：${exactTimeText(expiresAt)}` : ''}`
-        : '新接口已登录，等待下次检测后显示刷新时间';
-      return `<span class="manage-refresh-clock" data-account-id="${esc(session.account_id || '')}" data-login-ok="${loginOK}" data-refresh-at="${esc(refreshAt)}" data-expires-at="${esc(expiresAt)}" title="${esc(title)}">新接口刷新：${esc(manageRefreshText(refreshAt))}</span>`;
+        ? `下次保活：${exactTimeText(refreshAt)}${expiresAt ? `；管理 token 到期：${exactTimeText(expiresAt)}` : ''}`
+        : '新接口已登录，等待下次检测后显示保活时间';
+      return `<span class="manage-refresh-clock" data-account-id="${esc(session.account_id || '')}" data-login-ok="${loginOK}" data-refresh-at="${esc(refreshAt)}" data-expires-at="${esc(expiresAt)}" title="${esc(title)}">新接口保活：${esc(manageRefreshText(refreshAt))}</span>`;
     }
 
     function loginStateChipMode(saved, checked, ok) {
@@ -2075,31 +2032,17 @@
       sessionCheckInFlight = true;
       const buttons = ['sessionCheckButton', 'createCheckSessionButton'].map(id => $(id)).filter(Boolean);
       buttons.forEach(button => { button.disabled = true; });
-      const autoManageRefresh = options && options.source === 'manage_refresh';
-      const checkingText = autoManageRefresh ? '正在自动刷新新接口登录态...' : '正在检测新接口和旧接口登录态...';
-      if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = checkingText;
-      if ($('createSessionCheckStatus')) $('createSessionCheckStatus').textContent = autoManageRefresh ? '正在自动刷新...' : '正在检测...';
+      if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = '正在检测新接口和旧接口登录态...';
+      if ($('createSessionCheckStatus')) $('createSessionCheckStatus').textContent = '正在检测...';
       try {
-        let data;
-        let retryCount = 0;
-        do {
-          if (retryCount > 0) {
-            if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = `新接口正常但未返回刷新时间，正在继续刷新第 ${retryCount + 1} 次...`;
-            if ($('createSessionCheckStatus')) $('createSessionCheckStatus').textContent = `继续刷新新接口时间，第 ${retryCount + 1} 次...`;
-            await waitForManageRefreshRetryDelay();
-          }
-          data = await api('/api/icloud/session/check', {method:'POST', body:'{}'});
-          lastICloudSessions = data.sessions || (data.session && data.session.saved ? [data.session] : []);
-          renderICloudSessions(lastICloudSessions);
-          retryCount++;
-        } while (sessionsNeedRefreshTimeRetry(lastICloudSessions));
-
-        const retried = retryCount > 1;
+        const data = await api('/api/icloud/session/check', {method:'POST', body:'{}'});
+        lastICloudSessions = data.sessions || (data.session && data.session.saved ? [data.session] : []);
+        renderICloudSessions(lastICloudSessions);
         if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = data.message || '登录态检测完成';
         if ($('createSessionCheckStatus')) {
-          $('createSessionCheckStatus').textContent = autoManageRefresh || retried ? '新接口刷新时间已自动更新。' : (data.message || '检测完成，账号状态已刷新。');
+          $('createSessionCheckStatus').textContent = data.message || '检测完成，账号状态已刷新。';
         }
-        log(autoManageRefresh || retried ? '新接口刷新时间已自动更新' : (data.message || '登录态检测正常：新旧接口状态已刷新'));
+        log(data.message || '登录态检测正常：新旧接口状态已刷新');
         return true;
       } catch (err) {
         if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = '登录态检测失败；请按失败提示重新保存对应登录态。';
@@ -2588,11 +2531,13 @@
         const data = await api('/api/icloud/mailboxes/sync', {method:'POST', body: JSON.stringify({
           account_id: selectedAccountID
         })});
+        if (data.message) log(data.message);
         log(`同步完成：远端 ${data.total || 0} 个，新增 ${data.created || 0} 个，更新 ${data.updated || 0} 个，跳过 ${data.skipped || 0} 个`);
         (data.results || []).forEach(item => {
           const name = item.apple_id || item.account_id || '-';
+          const source = item.source === 'icloud_web' ? '旧接口' : '未同步';
           const suffix = item.error ? `，失败：${item.error}` : '';
-          log(`同步账号：${name}，远端 ${item.total || 0}，新增 ${item.created || 0}，更新 ${item.updated || 0}，跳过 ${item.skipped || 0}${suffix}`);
+          log(`同步账号：${name}，接口 ${source}，远端 ${item.total || 0}，新增 ${item.created || 0}，更新 ${item.updated || 0}，跳过 ${item.skipped || 0}${suffix}`);
         });
         await refresh();
       } catch (err) {

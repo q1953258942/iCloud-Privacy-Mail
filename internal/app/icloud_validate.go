@@ -50,7 +50,7 @@ func (c *ICloudSessionValidator) Validate(ctx context.Context, cookies []Session
 	if err != nil {
 		return validateResult{}, err
 	}
-	buildNumber := "2618Build21"
+	buildNumber := "2622Build20"
 	masteringNumber := buildNumber
 
 	u := url.URL{

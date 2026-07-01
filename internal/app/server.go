@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"net/http"
@@ -35,6 +36,7 @@ var mailboxCodePollDebounce = 100 * time.Millisecond
 var mailboxCodeLocalPollInterval = 100 * time.Millisecond
 var mailboxCodeBatchSyncTimeout = 120 * time.Second
 var mailboxCodeMaxClientWait = 30 * time.Second
+var iCloudMailboxListAccountTimeout = 25 * time.Second
 var mailWatcherPollInterval = 3 * time.Second
 var mailWatcherActiveTTL = 20 * time.Minute
 
@@ -72,9 +74,14 @@ type Server struct {
 	mailWatcherInitialFetchLimit   int
 	mailWatcherLookback            time.Duration
 	mailWatcherActiveUntil         map[string]time.Time
+	appleAccountKeepAliveMu        sync.Mutex
+	appleAccountKeepAliveCancel    context.CancelFunc
+	appleAccountKeepAliveEnabled   bool
+	appleAccountKeepAliveInterval  time.Duration
 	schedulerMu                    sync.Mutex
 	mailboxSchedulers              map[string]*mailboxSchedulerJob
 	createMailboxForOwner          func(ctx context.Context, ownerID, accountID, label, note string) (Mailbox, ICloudRemoteMailbox, error)
+	keepAliveAppleAccountState     func(ctx context.Context, state LoginState) (LoginState, error)
 	syncMailboxMessages            func(ctx context.Context, session ICloudSession, mailbox Mailbox, after time.Time, keyword string, maxThreads int) ([]ICloudSyncedMessage, error)
 	syncMailboxBatch               func(ctx context.Context, session ICloudSession, mailboxes []Mailbox, after time.Time, keyword string, maxThreads int) (map[string][]ICloudSyncedMessage, error)
 	syncCodeMailboxBatch           func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (map[string][]ICloudSyncedMessage, error)
@@ -142,6 +149,7 @@ func mailboxCreateChannelLabel(channel mailboxCreateChannel) string {
 type syncICloudMailboxResult struct {
 	AccountID string `json:"account_id,omitempty"`
 	AppleID   string `json:"apple_id,omitempty"`
+	Source    string `json:"source,omitempty"`
 	Total     int    `json:"total"`
 	Created   int    `json:"created"`
 	Updated   int    `json:"updated"`
@@ -191,28 +199,30 @@ type mailboxWatcherIdleWorker struct {
 
 func NewServer(cfg Config, store *FileStore, logger *slog.Logger) http.Handler {
 	s := &Server{
-		cfg:                          cfg,
-		store:                        store,
-		logger:                       logger,
-		mux:                          http.NewServeMux(),
-		icloudProtocolLogins:         newAppleAuthPendingStore(),
-		appleAccountLogins:           newAppleAuthPendingStore(),
-		icloudCreateGates:            make(map[string]chan struct{}),
-		icloudCreateLast:             make(map[string]time.Time),
-		icloudCreateCooldown:         make(map[string]time.Time),
-		icloudMailSyncGates:          make(map[string]chan struct{}),
-		icloudMailSyncLast:           make(map[string]time.Time),
-		mailboxSyncMinInterval:       mailboxMailSyncMinInterval,
-		mailboxCodeFastWait:          mailboxCodeFastWait,
-		mailboxCodePollers:           make(map[string]*mailboxCodePoller),
-		mailWatcherWake:              make(chan struct{}, 1),
-		mailWatcherEnabled:           cfg.MailWatcherEnabled,
-		mailWatcherInterval:          mailWatcherPollInterval,
-		mailWatcherFetchLimit:        defaultMailWatcherFetchLimit,
-		mailWatcherInitialFetchLimit: defaultMailWatcherInitialFetchLimit,
-		mailWatcherLookback:          defaultMailWatcherLookback,
-		mailWatcherActiveUntil:       make(map[string]time.Time),
-		mailboxSchedulers:            make(map[string]*mailboxSchedulerJob),
+		cfg:                           cfg,
+		store:                         store,
+		logger:                        logger,
+		mux:                           http.NewServeMux(),
+		icloudProtocolLogins:          newAppleAuthPendingStore(),
+		appleAccountLogins:            newAppleAuthPendingStore(),
+		icloudCreateGates:             make(map[string]chan struct{}),
+		icloudCreateLast:              make(map[string]time.Time),
+		icloudCreateCooldown:          make(map[string]time.Time),
+		icloudMailSyncGates:           make(map[string]chan struct{}),
+		icloudMailSyncLast:            make(map[string]time.Time),
+		mailboxSyncMinInterval:        mailboxMailSyncMinInterval,
+		mailboxCodeFastWait:           mailboxCodeFastWait,
+		mailboxCodePollers:            make(map[string]*mailboxCodePoller),
+		mailWatcherWake:               make(chan struct{}, 1),
+		mailWatcherEnabled:            cfg.MailWatcherEnabled,
+		mailWatcherInterval:           mailWatcherPollInterval,
+		mailWatcherFetchLimit:         defaultMailWatcherFetchLimit,
+		mailWatcherInitialFetchLimit:  defaultMailWatcherInitialFetchLimit,
+		mailWatcherLookback:           defaultMailWatcherLookback,
+		mailWatcherActiveUntil:        make(map[string]time.Time),
+		appleAccountKeepAliveEnabled:  cfg.AppleAccountKeepAliveEnabled,
+		appleAccountKeepAliveInterval: appleAccountKeepAliveDefaultInterval,
+		mailboxSchedulers:             make(map[string]*mailboxSchedulerJob),
 	}
 	if cfg.PublicSyncMinIntervalMS > 0 {
 		s.mailboxSyncMinInterval = time.Duration(cfg.PublicSyncMinIntervalMS) * time.Millisecond
@@ -232,7 +242,13 @@ func NewServer(cfg Config, store *FileStore, logger *slog.Logger) http.Handler {
 	if cfg.MailWatcherLookbackHours > 0 {
 		s.mailWatcherLookback = time.Duration(cfg.MailWatcherLookbackHours) * time.Hour
 	}
+	if cfg.AppleAccountKeepAliveMS > 0 {
+		s.appleAccountKeepAliveInterval = time.Duration(cfg.AppleAccountKeepAliveMS) * time.Millisecond
+	}
 	s.createMailboxForOwner = s.createICloudMailboxForOwner
+	s.keepAliveAppleAccountState = func(ctx context.Context, state LoginState) (LoginState, error) {
+		return NewICloudClient().keepAliveAppleAccountManageStateUnlocked(ctx, state)
+	}
 	s.syncMailboxMessages = func(ctx context.Context, session ICloudSession, mailbox Mailbox, after time.Time, keyword string, maxThreads int) ([]ICloudSyncedMessage, error) {
 		return NewICloudClient().SyncMailboxMessages(ctx, session, mailbox, after, keyword, maxThreads)
 	}
@@ -278,6 +294,35 @@ func (s *Server) StopMailWatcher() {
 	cancel := s.mailWatcherCancel
 	s.mailWatcherCancel = nil
 	s.mailWatcherMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (s *Server) StartAppleAccountKeepAlive(ctx context.Context) {
+	if !s.appleAccountKeepAliveEnabled {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.appleAccountKeepAliveMu.Lock()
+	if s.appleAccountKeepAliveCancel != nil {
+		s.appleAccountKeepAliveMu.Unlock()
+		return
+	}
+	keepAliveCtx, cancel := context.WithCancel(ctx)
+	s.appleAccountKeepAliveCancel = cancel
+	s.appleAccountKeepAliveMu.Unlock()
+
+	go s.runAppleAccountKeepAlive(keepAliveCtx)
+}
+
+func (s *Server) StopAppleAccountKeepAlive() {
+	s.appleAccountKeepAliveMu.Lock()
+	cancel := s.appleAccountKeepAliveCancel
+	s.appleAccountKeepAliveCancel = nil
+	s.appleAccountKeepAliveMu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
@@ -1595,13 +1640,35 @@ func (s *Server) handleSyncICloudMailboxes(w http.ResponseWriter, r *http.Reques
 	total := 0
 	failed := 0
 	out := make([]publicMailbox, 0)
+	type syncJobResult struct {
+		result syncICloudMailboxResult
+		rows   []publicMailbox
+		err    error
+	}
+	jobResults := make([]syncJobResult, len(sessions))
+	var wg sync.WaitGroup
+	for index, session := range sessions {
+		wg.Add(1)
+		go func(index int, session ICloudSession) {
+			defer wg.Done()
+			syncCtx, cancel := context.WithTimeout(r.Context(), iCloudMailboxListAccountTimeout)
+			defer cancel()
+			result, rows, err := s.syncICloudMailboxesForSession(syncCtx, r, ownerID, session)
+			if err != nil && errors.Is(err, context.DeadlineExceeded) {
+				err = errCode("icloud_sync_timeout", "该账号同步已有邮箱超时，请稍后单独重试", true)
+				result.Error = err.Error()
+			}
+			jobResults[index] = syncJobResult{result: result, rows: rows, err: err}
+		}(index, session)
+	}
+	wg.Wait()
 	results := make([]syncICloudMailboxResult, 0, len(sessions))
-	for _, session := range sessions {
-		result, rows, err := s.syncICloudMailboxesForSession(r.Context(), r, ownerID, session)
+	for _, job := range jobResults {
+		result, rows, err := job.result, job.rows, job.err
 		results = append(results, result)
 		if err != nil {
 			failed++
-			s.logger.Warn("iCloud mailbox list failed", "account_id", session.AccountID, "err", err)
+			s.logger.Warn("iCloud mailbox list failed", "account_id", result.AccountID, "err", err)
 			continue
 		}
 		total += result.Total
@@ -1610,12 +1677,13 @@ func (s *Server) handleSyncICloudMailboxes(w http.ResponseWriter, r *http.Reques
 		skipped += result.Skipped
 		out = append(out, rows...)
 	}
+	message := ""
 	if failed == len(sessions) {
-		writeError(w, http.StatusBadGateway, errCode("icloud_sync_failed", "全部 iCloud 账号同步失败", true))
-		return
+		message = "全部 iCloud 账号同步失败，请看每个账号的失败原因"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":   true,
+		"message":   message,
 		"total":     total,
 		"created":   created,
 		"updated":   updated,
@@ -1630,6 +1698,12 @@ func (s *Server) syncICloudMailboxesForSession(ctx context.Context, r *http.Requ
 	result := syncICloudMailboxResult{
 		AccountID: session.AccountID,
 		AppleID:   strings.TrimSpace(session.AppleID),
+		Source:    string(mailboxCreateChannelICloudWeb),
+	}
+	if !iCloudWebLoginSaved(session) {
+		err := errCode("icloud_session_missing", "该账号没有可用于同步已有邮箱的旧接口登录态，请先完成旧接口登录", true)
+		result.Error = err.Error()
+		return result, nil, err
 	}
 	remotes, err := NewICloudClient().ListPrivacyMailboxes(ctx, session)
 	if err != nil {
@@ -2612,6 +2686,151 @@ func (s *Server) runMailWatcher(ctx context.Context) {
 			s.syncMailWatcherRound(ctx, false)
 		}
 	}
+}
+
+func (s *Server) runAppleAccountKeepAlive(ctx context.Context) {
+	defer func() {
+		s.appleAccountKeepAliveMu.Lock()
+		s.appleAccountKeepAliveCancel = nil
+		s.appleAccountKeepAliveMu.Unlock()
+	}()
+
+	s.keepAliveAppleAccountRound(ctx)
+	interval := s.appleAccountKeepAliveInterval
+	if interval <= 0 {
+		interval = appleAccountKeepAliveDefaultInterval
+	}
+	ticker := time.NewTicker(appleAccountKeepAliveScanInterval(interval))
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.keepAliveAppleAccountRound(ctx)
+		}
+	}
+}
+
+func appleAccountKeepAliveScanInterval(base time.Duration) time.Duration {
+	if base <= 0 {
+		base = appleAccountKeepAliveDefaultInterval
+	}
+	interval := base / 4
+	if interval > 30*time.Second {
+		return 30 * time.Second
+	}
+	if interval < 5*time.Second {
+		return 5 * time.Second
+	}
+	return interval
+}
+
+func (s *Server) keepAliveAppleAccountRound(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	keepAliveFn := s.keepAliveAppleAccountState
+	if keepAliveFn == nil {
+		keepAliveFn = func(ctx context.Context, state LoginState) (LoginState, error) {
+			return NewICloudClient().keepAliveAppleAccountManageStateUnlocked(ctx, state)
+		}
+	}
+	baseInterval := s.appleAccountKeepAliveInterval
+	if baseInterval <= 0 {
+		baseInterval = appleAccountKeepAliveDefaultInterval
+	}
+	now := time.Now()
+	for _, session := range s.appleAccountKeepAliveSessions() {
+		if ctx.Err() != nil {
+			return
+		}
+		state, ok := appleAccountLoginState(session)
+		if !ok || strings.TrimSpace(state.APIKey) == "" {
+			continue
+		}
+		interval := appleAccountKeepAliveIntervalForSession(session, baseInterval)
+		if !appleAccountKeepAliveDue(state, now, interval) {
+			continue
+		}
+		callCtx, cancel := context.WithTimeout(ctx, appleAccountKeepAliveTimeout)
+		release, gateErr := acquireAppleAccountOperationGate(callCtx, appleAccountOperationKey(session, state))
+		if gateErr != nil {
+			cancel()
+			if s.logger != nil {
+				s.logger.Warn("apple account keepalive gate failed", "owner", s.ownerName(session.OwnerID), "account_id", session.AccountID, "apple_id", session.AppleID, "err", gateErr)
+			}
+			continue
+		}
+		next, err := keepAliveFn(callCtx, state)
+		release()
+		cancel()
+		if err != nil {
+			if isCodedError(err, "apple_account_auth_failed") {
+				state.LastCheckedAt = time.Now()
+				state.LastCheckOK = false
+				state.LastStatusMessage = "新接口登录态异常：" + err.Error()
+				session = withAppleAccountLoginState(session, state)
+				if saveErr := s.store.SaveICloudSessionForOwner(session.OwnerID, session); saveErr != nil && s.logger != nil {
+					s.logger.Warn("apple account keepalive save failed", "owner", s.ownerName(session.OwnerID), "account_id", session.AccountID, "err", saveErr)
+				}
+			}
+			if s.logger != nil {
+				s.logger.Warn("apple account keepalive failed", "owner", s.ownerName(session.OwnerID), "account_id", session.AccountID, "apple_id", session.AppleID, "err", err)
+			}
+			continue
+		}
+		session = withAppleAccountLoginState(session, next)
+		if err := s.store.SaveICloudSessionForOwner(session.OwnerID, session); err != nil {
+			if s.logger != nil {
+				s.logger.Warn("apple account keepalive save failed", "owner", s.ownerName(session.OwnerID), "account_id", session.AccountID, "err", err)
+			}
+			continue
+		}
+		if s.logger != nil {
+			s.logger.Info("apple account keepalive ok", "owner", s.ownerName(session.OwnerID), "account_id", session.AccountID, "apple_id", session.AppleID)
+		}
+	}
+}
+
+func (s *Server) appleAccountKeepAliveSessions() []ICloudSession {
+	state := s.store.Snapshot()
+	out := make([]ICloudSession, 0, len(state.ICloudSessions)+1)
+	if state.ICloudSession != nil && appleAccountLoginSaved(*state.ICloudSession) {
+		out = append(out, cloneICloudSession(*state.ICloudSession))
+	}
+	for _, session := range state.ICloudSessions {
+		if !appleAccountLoginSaved(session) {
+			continue
+		}
+		out = append(out, cloneICloudSession(session))
+	}
+	return out
+}
+
+func appleAccountKeepAliveIntervalForSession(session ICloudSession, base time.Duration) time.Duration {
+	if base <= 0 {
+		base = appleAccountKeepAliveDefaultInterval
+	}
+	jitter := base / 5
+	if jitter > time.Minute {
+		jitter = time.Minute
+	}
+	if jitter < time.Second {
+		return base
+	}
+	steps := int64(jitter / time.Second)
+	if steps <= 0 {
+		return base
+	}
+	h := fnv.New32a()
+	_, _ = io.WriteString(h, strings.TrimSpace(session.OwnerID)+"|"+strings.TrimSpace(session.AccountID)+"|"+strings.ToLower(strings.TrimSpace(session.AppleID)))
+	offsetSteps := int64(h.Sum32()%uint32(steps*2+1)) - steps
+	next := base + time.Duration(offsetSteps)*time.Second
+	if base >= time.Minute && next < 30*time.Second {
+		return 30 * time.Second
+	}
+	return next
 }
 
 func (s *Server) ensureMailWatcherIdleWorkers(ctx context.Context, workers map[string]mailboxWatcherIdleWorker) {
@@ -3745,7 +3964,7 @@ func (s *Server) publicSessionForRequest(r *http.Request) publicICloudSession {
 	if !ok {
 		return publicSession(nil)
 	}
-	return publicSession(&session)
+	return s.publicSession(&session)
 }
 
 func (s *Server) publicSessionsForRequest(r *http.Request) []publicICloudSession {
@@ -3775,7 +3994,7 @@ func (s *Server) publicSessionsForOwner(ownerID string) []publicICloudSession {
 	sessions := s.sessionsForOwner(ownerID, "")
 	out := make([]publicICloudSession, 0, len(sessions))
 	for _, session := range sessions {
-		out = append(out, publicSession(&session))
+		out = append(out, s.publicSession(&session))
 	}
 	return out
 }
@@ -4164,7 +4383,19 @@ func (s *Server) mailboxAPIURL(r *http.Request, mailbox Mailbox) string {
 	return fmt.Sprintf("%s/api/v1/mailboxes/%s/code?key=%s", strings.TrimRight(baseURL, "/"), url.PathEscape(mailbox.Email), url.QueryEscape(mailbox.APIToken))
 }
 
+func (s *Server) publicSession(session *ICloudSession) publicICloudSession {
+	interval := s.appleAccountKeepAliveInterval
+	if interval <= 0 {
+		interval = appleAccountKeepAliveDefaultInterval
+	}
+	return publicSessionWithKeepAliveInterval(session, interval)
+}
+
 func publicSession(session *ICloudSession) publicICloudSession {
+	return publicSessionWithKeepAliveInterval(session, appleAccountKeepAliveDefaultInterval)
+}
+
+func publicSessionWithKeepAliveInterval(session *ICloudSession, keepAliveInterval time.Duration) publicICloudSession {
 	if session == nil {
 		return publicICloudSession{
 			Saved:              false,
@@ -4184,8 +4415,8 @@ func publicSession(session *ICloudSession) publicICloudSession {
 	appleAccountState, _ := appleAccountLoginState(*session)
 	icloudIMAPState, _ := iCloudIMAPLoginState(*session)
 	appleAccountNextRefreshAt := time.Time{}
-	if appleAccountLoginSaved && !appleAccountState.ManageExpiresAt.IsZero() {
-		appleAccountNextRefreshAt = appleAccountState.ManageExpiresAt.Add(-appleAccountManageRefreshSkew)
+	if appleAccountLoginSaved && !appleAccountState.LastCheckedAt.IsZero() {
+		appleAccountNextRefreshAt = appleAccountState.LastCheckedAt.Add(appleAccountKeepAliveIntervalForSession(*session, keepAliveInterval))
 	}
 	return publicICloudSession{
 		Saved:                       true,

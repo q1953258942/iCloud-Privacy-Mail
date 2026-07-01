@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,6 +55,8 @@ func NewICloudClient() *ICloudClient {
 
 const mailboxSyncCursorOverlap = 2 * time.Minute
 const appleAccountManageRefreshSkew = 0 * time.Second
+const appleAccountKeepAliveDefaultInterval = 4 * time.Minute
+const appleAccountKeepAliveTimeout = 25 * time.Second
 
 var appleAccountManageBaseURL = "https://appleid.apple.com"
 var appleAccountOperationMu sync.Mutex
@@ -180,7 +183,8 @@ func (c *ICloudClient) CheckAppleAccountManageSession(ctx context.Context, sessi
 	if !ok {
 		return session, errCode("apple_account_session_missing", "未保存新接口登录态，请先完成新接口登录", true)
 	}
-	if appleAccountManageRecentlyOK(loginState, time.Now()) {
+	now := time.Now()
+	if appleAccountManageRecentlyOK(loginState, now) && !appleAccountKeepAliveDue(loginState, now, appleAccountKeepAliveDefaultInterval) {
 		return withAppleAccountLoginState(session, loginState), nil
 	}
 	release, err := acquireAppleAccountOperationGate(ctx, appleAccountOperationKey(session, loginState))
@@ -188,11 +192,11 @@ func (c *ICloudClient) CheckAppleAccountManageSession(ctx context.Context, sessi
 		return session, err
 	}
 	defer release()
-	refreshed, err := c.refreshAppleAccountManageStateUnlocked(ctx, loginState)
+	kept, err := c.keepAliveAppleAccountManageStateUnlocked(ctx, loginState)
 	if err != nil {
 		return session, err
 	}
-	return withAppleAccountLoginState(session, refreshed), nil
+	return withAppleAccountLoginState(session, kept), nil
 }
 
 func withAppleAccountLoginState(session ICloudSession, next LoginState) ICloudSession {
@@ -354,6 +358,67 @@ func (c *ICloudClient) RefreshAppleAccountManageState(ctx context.Context, login
 	}
 	defer release()
 	return c.refreshAppleAccountManageStateUnlocked(ctx, loginState)
+}
+
+func (c *ICloudClient) KeepAliveAppleAccountManageState(ctx context.Context, loginState LoginState) (LoginState, error) {
+	release, err := acquireAppleAccountOperationGate(ctx, appleAccountOperationKey(ICloudSession{}, loginState))
+	if err != nil {
+		return loginState, err
+	}
+	defer release()
+	return c.keepAliveAppleAccountManageStateUnlocked(ctx, loginState)
+}
+
+func (c *ICloudClient) keepAliveAppleAccountManageStateUnlocked(ctx context.Context, loginState LoginState) (LoginState, error) {
+	if strings.TrimSpace(loginState.Scnt) == "" {
+		return loginState, errCode("apple_account_session_missing", "当前登录态缺少 Apple Account 管理态，请重新协议登录", true)
+	}
+	loginState, err := c.refreshAppleAccountManageStateUnlocked(ctx, loginState)
+	if err != nil {
+		return loginState, err
+	}
+	if _, err := c.callAppleAccountRaw(ctx, &loginState, loginState.APIKey, http.MethodGet, "/account/manage/forwardemail", nil, nil); err != nil {
+		return loginState, err
+	}
+	if _, err := c.callAppleAccountRaw(ctx, &loginState, loginState.APIKey, http.MethodPost, "/v2/jslogs", appleAccountJSLogBody(), nil); err != nil {
+		if os.Getenv("IPM_DEBUG_APPLE_ACCOUNT") == "1" {
+			fmt.Fprintf(os.Stderr, "APPLE_ACCOUNT_DEBUG keepalive jslogs ignored err=%v\n", err)
+		}
+	}
+	markAppleAccountManageOK(&loginState)
+	return loginState, nil
+}
+
+func appleAccountJSLogBody() []map[string]any {
+	return []map[string]any{{
+		"eventId":       appleAccountJSLogEventID(),
+		"timestamp":     time.Now().UnixMilli(),
+		"eventType":     "custom",
+		"componentName": "performance",
+		"action":        "memory",
+		"metadata": map[string]any{
+			"domNodeCount":    0,
+			"usedJSHeapSize":  0,
+			"totalJSHeapSize": 0,
+			"heapUtilization": 0,
+			"createdAt":       0,
+			"elapsedTime":     0,
+			"marks": map[string]any{
+				"startTime": 0,
+			},
+			"eventVersion": 1,
+		},
+	}}
+}
+
+func appleAccountKeepAliveDue(loginState LoginState, now time.Time, interval time.Duration) bool {
+	if interval <= 0 {
+		interval = appleAccountKeepAliveDefaultInterval
+	}
+	if loginState.LastCheckedAt.IsZero() {
+		return true
+	}
+	return !now.Before(loginState.LastCheckedAt.Add(interval))
 }
 
 func (c *ICloudClient) refreshAppleAccountManageStateUnlocked(ctx context.Context, loginState LoginState) (LoginState, error) {
@@ -828,6 +893,22 @@ func updateAppleAccountLoginStateFromHeaders(loginState *LoginState, header http
 	loginState.SavedAt = time.Now()
 }
 
+func appleAccountJSLogEventID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("ipm-%d", time.Now().UnixNano())
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4],
+		b[4:6],
+		b[6:8],
+		b[8:10],
+		b[10:16],
+	)
+}
+
 func appleAccountFDClientInfo(userAgent string) string {
 	info := map[string]string{
 		"U": firstNonEmpty(userAgent, appleAccountManageUserAgent),
@@ -1086,6 +1167,10 @@ func appleAccountRequestStage(method, path string) string {
 		return "打开隐私页面"
 	case path == "/bootstrap/portal":
 		return "预热门户"
+	case method == http.MethodPost && path == "/v2/jslogs":
+		return "新接口保活"
+	case method == http.MethodGet && path == "/account/manage/forwardemail":
+		return "读取转发邮箱"
 	case method == http.MethodPost && path == "/account/manage/email/private/add":
 		return "生成候选隐私邮箱"
 	case method == http.MethodPut && path == "/account/manage/email/private/add/complete":
@@ -1978,8 +2063,8 @@ func (c *ICloudClient) endpointWithBase(session ICloudSession, baseURL, path str
 	rel := &url.URL{Path: strings.TrimLeft(path, "/")}
 	u := base.ResolveReference(rel)
 	q := u.Query()
-	q.Set("clientBuildNumber", firstNonEmpty(session.ClientBuildNumber, "2618Build21"))
-	q.Set("clientMasteringNumber", firstNonEmpty(session.MasteringNumber, session.ClientBuildNumber, "2618Build21"))
+	q.Set("clientBuildNumber", firstNonEmpty(session.ClientBuildNumber, "2622Build20"))
+	q.Set("clientMasteringNumber", firstNonEmpty(session.MasteringNumber, session.ClientBuildNumber, "2622Build20"))
 	q.Set("clientId", firstNonEmpty(session.ClientID, "local-panel"))
 	q.Set("dsid", session.DSID)
 	u.RawQuery = q.Encode()

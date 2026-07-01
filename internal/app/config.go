@@ -19,6 +19,8 @@ type Config struct {
 	ICloudDefaultHost            string `json:"icloud_default_host"`
 	ICloudClientID               string `json:"icloud_client_id"`
 	AppleAccountAPIKey           string `json:"apple_account_api_key"`
+	AppleAccountKeepAliveEnabled bool   `json:"apple_account_keep_alive_enabled"`
+	AppleAccountKeepAliveMS      int    `json:"apple_account_keep_alive_ms"`
 	MailWatcherEnabled           bool   `json:"mail_watcher_enabled"`
 	MailWatcherPollMS            int    `json:"mail_watcher_poll_ms"`
 	MailWatcherFetchLimit        int    `json:"mail_watcher_fetch_limit"`
@@ -39,6 +41,8 @@ func LoadConfig(path string) (Config, error) {
 		ICloudDefaultHost:            "www.icloud.com.cn",
 		ICloudClientID:               defaultAppleOAuthClientID,
 		AppleAccountAPIKey:           strings.TrimSpace(os.Getenv("IPM_APPLE_ACCOUNT_API_KEY")),
+		AppleAccountKeepAliveEnabled: envBool("APPLE_ACCOUNT_KEEP_ALIVE_ENABLED", true),
+		AppleAccountKeepAliveMS:      envPositiveInt("APPLE_ACCOUNT_KEEP_ALIVE_MS", 240000),
 		MailWatcherEnabled:           envBool("MAIL_WATCHER_ENABLED", true),
 		MailWatcherPollMS:            envPositiveInt("MAIL_WATCHER_POLL_MS", 3000),
 		MailWatcherFetchLimit:        envPositiveInt("MAIL_WATCHER_FETCH_LIMIT", 8),
@@ -88,6 +92,16 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if strings.TrimSpace(fromFile.AppleAccountAPIKey) != "" {
 		cfg.AppleAccountAPIKey = strings.TrimSpace(fromFile.AppleAccountAPIKey)
+	}
+	if rawValue, ok := raw["apple_account_keep_alive_enabled"]; ok {
+		var enabled bool
+		if err := json.Unmarshal(rawValue, &enabled); err != nil {
+			return Config{}, err
+		}
+		cfg.AppleAccountKeepAliveEnabled = enabled
+	}
+	if fromFile.AppleAccountKeepAliveMS > 0 {
+		cfg.AppleAccountKeepAliveMS = fromFile.AppleAccountKeepAliveMS
 	}
 	if rawValue, ok := raw["mail_watcher_enabled"]; ok {
 		var enabled bool
