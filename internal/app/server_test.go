@@ -1999,6 +1999,99 @@ func TestSubmitAppleAccountManage2FADefaultsTrustedDeviceAndUsesFreshScnt(t *tes
 	}
 }
 
+func TestSubmitAppleAccountManage2FAUsesPhoneMethod(t *testing.T) {
+	oldBaseURL := appleAccountManageBaseURL
+	defer func() { appleAccountManageBaseURL = oldBaseURL }()
+
+	var authPaths []string
+	var submittedCode string
+	var submittedPhoneID float64
+	authTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authPaths = append(authPaths, r.Method+" "+r.URL.Path)
+		switch r.Method + " " + r.URL.Path {
+		case "POST /verify/phone/securitycode":
+			var body struct {
+				PhoneNumber struct {
+					ID float64 `json:"id"`
+				} `json:"phoneNumber"`
+				SecurityCode struct {
+					Code string `json:"code"`
+				} `json:"securityCode"`
+				Mode string `json:"mode"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			submittedCode = body.SecurityCode.Code
+			submittedPhoneID = body.PhoneNumber.ID
+			if body.Mode != "sms" {
+				t.Fatalf("mode = %q, want sms", body.Mode)
+			}
+			w.Header().Set("scnt", "fresh-scnt")
+			w.Header().Set("X-Apple-ID-Session-Id", "fresh-session")
+			w.WriteHeader(http.StatusNoContent)
+		case "GET /2sv/trust":
+			w.Header().Set("scnt", "trusted-scnt")
+			w.Header().Set("X-Apple-ID-Session-Id", "trusted-session")
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected auth request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer authTS.Close()
+
+	manageTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /account/manage/gs/ws/token":
+			w.Header().Set("scnt", "token-scnt")
+			_, _ = w.Write([]byte(`{"timeOutInterval":15}`))
+		case "GET /account/manage":
+			w.Header().Set("scnt", "manage-scnt")
+			_, _ = w.Write([]byte(`{"apiKey":"account-key"}`))
+		default:
+			t.Fatalf("unexpected manage request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer manageTS.Close()
+	appleAccountManageBaseURL = manageTS.URL
+
+	session := &appleAuthSession{
+		Endpoints: appleAuthEndpoints{
+			Home: "https://account.apple.com",
+			Auth: authTS.URL,
+			Host: "appleid.apple.com",
+		},
+		AppleID:         "user@example.com",
+		ClientID:        appleAccountManageOAuthClientID,
+		FrameID:         "unit",
+		UserAgent:       appleAccountManageUserAgent,
+		Scnt:            "old-scnt",
+		SessionID:       "old-session",
+		TwoFactorMethod: appleTwoFactorMethodPhone,
+		TwoFactorPhone:  json.RawMessage(`{"id":9,"nonFTEU":true}`),
+	}
+	client := &AppleAuthClient{httpClient: authTS.Client()}
+	icloudSession, err := client.SubmitAppleAccountManage2FA(t.Context(), appleAuthPending{Session: session}, "654321", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if submittedCode != "654321" || submittedPhoneID != 9 {
+		t.Fatalf("submitted code/id = %q/%v, want 654321/9", submittedCode, submittedPhoneID)
+	}
+	wantAuthPaths := []string{
+		"POST /verify/phone/securitycode",
+		"GET /2sv/trust",
+	}
+	if strings.Join(authPaths, "\n") != strings.Join(wantAuthPaths, "\n") {
+		t.Fatalf("auth paths = %#v, want %#v", authPaths, wantAuthPaths)
+	}
+	state, ok := appleAccountLoginState(icloudSession)
+	if !ok || state.Scnt != "manage-scnt" || state.APIKey != "account-key" || state.SessionID != "trusted-session" {
+		t.Fatalf("apple account state = %+v ok=%v, want fresh session/scnt/api key", state, ok)
+	}
+}
+
 func TestAppleAuthClientValidatePhoneCodeUsesStoredPhoneNumber(t *testing.T) {
 	var body map[string]any
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -5508,6 +5601,8 @@ func TestCreateSettingsAreSavedServerSide(t *testing.T) {
 		"account_ids":[%q],
 		"create_channel":"apple_account",
 		"scheduler_create_channel":"icloud_web",
+		"apple_account_two_factor_method":"phone",
+		"icloud_web_two_factor_method":"trusted_device",
 		"scheduler_interval_minutes":30,
 		"scheduler_round_interval_seconds":8,
 		"mailbox_page_size":25
@@ -5533,6 +5628,8 @@ func TestCreateSettingsAreSavedServerSide(t *testing.T) {
 			AccountIDs                    []string `json:"account_ids"`
 			CreateChannel                 string   `json:"create_channel"`
 			SchedulerCreateChannel        string   `json:"scheduler_create_channel"`
+			AppleAccountTwoFactorMethod   string   `json:"apple_account_two_factor_method"`
+			ICloudWebTwoFactorMethod      string   `json:"icloud_web_two_factor_method"`
 			SchedulerIntervalMinutes      int      `json:"scheduler_interval_minutes"`
 			SchedulerRoundIntervalSeconds int      `json:"scheduler_round_interval_seconds"`
 			MailboxPageSize               int      `json:"mailbox_page_size"`
@@ -5546,6 +5643,8 @@ func TestCreateSettingsAreSavedServerSide(t *testing.T) {
 		!reflect.DeepEqual(body.Settings.AccountIDs, []string{account.ID}) ||
 		body.Settings.CreateChannel != string(mailboxCreateChannelAppleAccount) ||
 		body.Settings.SchedulerCreateChannel != string(mailboxCreateChannelICloudWeb) ||
+		body.Settings.AppleAccountTwoFactorMethod != appleTwoFactorMethodPhone ||
+		body.Settings.ICloudWebTwoFactorMethod != appleTwoFactorMethodTrustedDevice ||
 		body.Settings.SchedulerIntervalMinutes != 30 ||
 		body.Settings.SchedulerRoundIntervalSeconds != 8 ||
 		body.Settings.MailboxPageSize != 25 {

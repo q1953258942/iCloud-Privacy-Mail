@@ -414,6 +414,8 @@ func (s *Server) handleSaveCreateSettings(w http.ResponseWriter, r *http.Request
 		AccountIDs                    []string `json:"account_ids"`
 		CreateChannel                 string   `json:"create_channel"`
 		SchedulerCreateChannel        string   `json:"scheduler_create_channel"`
+		AppleAccountTwoFactorMethod   string   `json:"apple_account_two_factor_method"`
+		ICloudWebTwoFactorMethod      string   `json:"icloud_web_two_factor_method"`
 		SchedulerIntervalMinutes      int      `json:"scheduler_interval_minutes"`
 		SchedulerRoundIntervalSeconds int      `json:"scheduler_round_interval_seconds"`
 		MailboxPageSize               int      `json:"mailbox_page_size"`
@@ -435,6 +437,8 @@ func (s *Server) handleSaveCreateSettings(w http.ResponseWriter, r *http.Request
 		AccountIDs:                    accountIDs,
 		CreateChannel:                 payload.CreateChannel,
 		SchedulerCreateChannel:        payload.SchedulerCreateChannel,
+		AppleAccountTwoFactorMethod:   payload.AppleAccountTwoFactorMethod,
+		ICloudWebTwoFactorMethod:      payload.ICloudWebTwoFactorMethod,
 		SchedulerIntervalMinutes:      payload.SchedulerIntervalMinutes,
 		SchedulerRoundIntervalSeconds: payload.SchedulerRoundIntervalSeconds,
 		MailboxPageSize:               payload.MailboxPageSize,
@@ -1384,8 +1388,9 @@ func checkSavedLoginStatesWithIMAP(ctx context.Context, client *ICloudClient, se
 
 func (s *Server) handleStartICloudProtocolLogin(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
-		AppleID  string `json:"apple_id"`
-		Password string `json:"password"`
+		AppleID         string `json:"apple_id"`
+		Password        string `json:"password"`
+		TwoFactorMethod string `json:"two_factor_method"`
 	}
 	if err := decodeJSON(r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -1398,6 +1403,7 @@ func (s *Server) handleStartICloudProtocolLogin(w http.ResponseWriter, r *http.R
 		s.cfg.ICloudDefaultHost,
 		s.cfg.ICloudClientID,
 		s.icloudProtocolLogins,
+		payload.TwoFactorMethod,
 	)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
@@ -1463,8 +1469,9 @@ func (s *Server) handleSubmitICloudProtocol2FA(w http.ResponseWriter, r *http.Re
 
 func (s *Server) handleStartAppleAccountLogin(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
-		AppleID  string `json:"apple_id"`
-		Password string `json:"password"`
+		AppleID         string `json:"apple_id"`
+		Password        string `json:"password"`
+		TwoFactorMethod string `json:"two_factor_method"`
 	}
 	if err := decodeJSON(r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -1475,6 +1482,7 @@ func (s *Server) handleStartAppleAccountLogin(w http.ResponseWriter, r *http.Req
 		payload.AppleID,
 		payload.Password,
 		s.appleAccountLogins,
+		payload.TwoFactorMethod,
 	)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
@@ -3983,6 +3991,8 @@ func publicCreateSettings(settings CreateSettings) map[string]any {
 		"create_channel_label":             mailboxCreateChannelLabel(createChannel),
 		"scheduler_create_channel":         string(schedulerChannel),
 		"scheduler_create_channel_label":   mailboxCreateChannelLabel(schedulerChannel),
+		"apple_account_two_factor_method":  normalizeAppleTwoFactorMethod(settings.AppleAccountTwoFactorMethod),
+		"icloud_web_two_factor_method":     normalizeAppleTwoFactorMethod(settings.ICloudWebTwoFactorMethod),
 		"scheduler_interval_minutes":       settings.SchedulerIntervalMinutes,
 		"scheduler_round_interval_seconds": settings.SchedulerRoundIntervalSeconds,
 		"mailbox_page_size":                settings.MailboxPageSize,

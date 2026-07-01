@@ -31,7 +31,7 @@ func TestLiveAppleAccountManageLoginAndSave(t *testing.T) {
 	defer cancel()
 
 	pendingStore := newAppleAuthPendingStore()
-	result, err := NewAppleAuthClient().StartAppleAccountManageLogin(ctx, appleID, password, pendingStore)
+	result, err := NewAppleAuthClient().StartAppleAccountManageLogin(ctx, appleID, password, pendingStore, appleTwoFactorMethodTrustedDevice)
 	if err != nil {
 		t.Fatalf("start Apple Account manage login: %v", err)
 	}

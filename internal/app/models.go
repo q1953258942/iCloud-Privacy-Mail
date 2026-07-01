@@ -159,6 +159,8 @@ type CreateSettings struct {
 	AccountIDs                    []string  `json:"account_ids,omitempty"`
 	CreateChannel                 string    `json:"create_channel,omitempty"`
 	SchedulerCreateChannel        string    `json:"scheduler_create_channel,omitempty"`
+	AppleAccountTwoFactorMethod   string    `json:"apple_account_two_factor_method,omitempty"`
+	ICloudWebTwoFactorMethod      string    `json:"icloud_web_two_factor_method,omitempty"`
 	SchedulerIntervalMinutes      int       `json:"scheduler_interval_minutes,omitempty"`
 	SchedulerRoundIntervalSeconds int       `json:"scheduler_round_interval_seconds,omitempty"`
 	MailboxPageSize               int       `json:"mailbox_page_size,omitempty"`

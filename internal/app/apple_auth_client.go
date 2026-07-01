@@ -32,6 +32,15 @@ const (
 	appleTwoFactorMethodPhone         = "phone"
 )
 
+func normalizeAppleTwoFactorMethod(method string) string {
+	switch strings.ToLower(strings.TrimSpace(method)) {
+	case appleTwoFactorMethodPhone, "sms", "phone_sms", "trusted_phone", "trusted_phone_number":
+		return appleTwoFactorMethodPhone
+	default:
+		return appleTwoFactorMethodTrustedDevice
+	}
+}
+
 type AppleAuthClient struct {
 	httpClient *http.Client
 }
@@ -173,12 +182,13 @@ func (s *appleAuthPendingStore) cleanupLocked(now time.Time) {
 	}
 }
 
-func (c *AppleAuthClient) StartLogin(ctx context.Context, appleID, password, defaultHost, clientID string, pendingStore *appleAuthPendingStore) (appleAuthStartResult, error) {
+func (c *AppleAuthClient) StartLogin(ctx context.Context, appleID, password, defaultHost, clientID string, pendingStore *appleAuthPendingStore, twoFactorMethod string) (appleAuthStartResult, error) {
 	appleID = strings.ToLower(strings.TrimSpace(appleID))
 	if appleID == "" || strings.TrimSpace(password) == "" {
 		return appleAuthStartResult{}, errCode("apple_credentials_missing", "缺少 Apple ID 或密码", false)
 	}
-	result, err := c.startLoginOnHost(ctx, appleID, password, defaultHost, clientID, pendingStore)
+	method := normalizeAppleTwoFactorMethod(twoFactorMethod)
+	result, err := c.startLoginOnHost(ctx, appleID, password, defaultHost, clientID, pendingStore, method)
 	if err == nil {
 		return result, nil
 	}
@@ -191,14 +201,15 @@ func (c *AppleAuthClient) StartLogin(ctx context.Context, appleID, password, def
 	if currentHost == nextHost {
 		return appleAuthStartResult{}, err
 	}
-	return c.startLoginOnHost(ctx, appleID, password, nextHost, clientID, pendingStore)
+	return c.startLoginOnHost(ctx, appleID, password, nextHost, clientID, pendingStore, method)
 }
 
-func (c *AppleAuthClient) StartAppleAccountManageLogin(ctx context.Context, appleID, password string, pendingStore *appleAuthPendingStore) (appleAuthStartResult, error) {
+func (c *AppleAuthClient) StartAppleAccountManageLogin(ctx context.Context, appleID, password string, pendingStore *appleAuthPendingStore, twoFactorMethod string) (appleAuthStartResult, error) {
 	appleID = strings.ToLower(strings.TrimSpace(appleID))
 	if appleID == "" || strings.TrimSpace(password) == "" {
 		return appleAuthStartResult{}, errCode("apple_credentials_missing", "缺少 Apple ID 或密码", false)
 	}
+	method := normalizeAppleTwoFactorMethod(twoFactorMethod)
 	frameID, err := randomUUID()
 	if err != nil {
 		return appleAuthStartResult{}, err
@@ -227,11 +238,16 @@ func (c *AppleAuthClient) StartAppleAccountManageLogin(ctx context.Context, appl
 		return appleAuthStartResult{}, err
 	}
 	if needs2FA {
-		session.TwoFactorMethod = appleTwoFactorMethodTrustedDevice
-		// signin/complete already asks Apple to send the trusted-device code; do not resend or switch channels here.
+		session.TwoFactorMethod = method
 		message := "Apple Account 已向受信任设备发送验证码；收到 6 位验证码后提交"
 		if err := c.refreshAuthState(ctx, session); err != nil {
 			message = "Apple Account 已要求 2FA；请查看受信任设备验证码"
+		}
+		if method == appleTwoFactorMethodPhone {
+			if err := c.requestPhoneSecurityCode(ctx, session, nil); err != nil {
+				return appleAuthStartResult{}, err
+			}
+			message = "Apple Account 已向受信任手机号发送短信验证码；收到 6 位验证码后提交"
 		}
 		pending, err := pendingStore.put(session)
 		if err != nil {
@@ -257,7 +273,7 @@ func (c *AppleAuthClient) StartAppleAccountManageLogin(ctx context.Context, appl
 	}, nil
 }
 
-func (c *AppleAuthClient) startLoginOnHost(ctx context.Context, appleID, password, host, clientID string, pendingStore *appleAuthPendingStore) (appleAuthStartResult, error) {
+func (c *AppleAuthClient) startLoginOnHost(ctx context.Context, appleID, password, host, clientID string, pendingStore *appleAuthPendingStore, twoFactorMethod string) (appleAuthStartResult, error) {
 	frameID, err := randomUUID()
 	if err != nil {
 		return appleAuthStartResult{}, err
@@ -285,8 +301,15 @@ func (c *AppleAuthClient) startLoginOnHost(ctx context.Context, appleID, passwor
 		return appleAuthStartResult{}, errCode("apple_session_token_missing", "Apple 登录未返回 Session Token，请重新协议登录或检查账号安全状态", true)
 	}
 	if needs2FA {
+		session.TwoFactorMethod = normalizeAppleTwoFactorMethod(twoFactorMethod)
 		message := "已触发 Apple 2FA，请在受信任设备允许后输入 6 位验证码"
-		if err := c.requestTrustedDeviceCode(ctx, session); err != nil {
+		if session.TwoFactorMethod == appleTwoFactorMethodPhone {
+			_ = c.refreshAuthState(ctx, session)
+			if err := c.requestPhoneSecurityCode(ctx, session, nil); err != nil {
+				return appleAuthStartResult{}, err
+			}
+			message = "已向受信任手机号发送短信验证码，请输入 6 位验证码"
+		} else if err := c.requestTrustedDeviceCode(ctx, session); err != nil {
 			var redirect appleDomainRedirectError
 			if errors.As(err, &redirect) {
 				return appleAuthStartResult{}, err
@@ -374,8 +397,15 @@ func (c *AppleAuthClient) SubmitAppleAccountManage2FA(ctx context.Context, pendi
 }
 
 func (c *AppleAuthClient) submit2FAWithSession(ctx context.Context, session *appleAuthSession, code string) (ICloudSession, error) {
-	if err := c.validateTrustedDeviceCode(ctx, session, code); err != nil {
-		return ICloudSession{}, err
+	switch session.TwoFactorMethod {
+	case appleTwoFactorMethodPhone:
+		if err := c.validatePhoneSecurityCode(ctx, session, code, nil); err != nil {
+			return ICloudSession{}, err
+		}
+	default:
+		if err := c.validateTrustedDeviceCode(ctx, session, code); err != nil {
+			return ICloudSession{}, err
+		}
 	}
 	if err := c.trustSession(ctx, session); err != nil {
 		return ICloudSession{}, err
@@ -629,7 +659,7 @@ func (c *AppleAuthClient) refreshAuthState(ctx context.Context, session *appleAu
 	delete(headers, "Origin")
 	delete(headers, "X-Apple-App-Id")
 	_, data, err := c.do(ctx, session, http.MethodGet, session.Endpoints.Auth, headers, nil, nil, false)
-	if err == nil && session.isAppleAccountManage() {
+	if err == nil {
 		session.rememberTwoFactorPhoneNumber(data)
 	}
 	return err

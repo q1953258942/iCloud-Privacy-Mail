@@ -1310,6 +1310,8 @@ func defaultCreateSettings(ownerID string) CreateSettings {
 		OwnerID:                       strings.TrimSpace(ownerID),
 		CreateChannel:                 string(mailboxCreateChannelAuto),
 		SchedulerCreateChannel:        string(mailboxCreateChannelAuto),
+		AppleAccountTwoFactorMethod:   appleTwoFactorMethodTrustedDevice,
+		ICloudWebTwoFactorMethod:      appleTwoFactorMethodTrustedDevice,
 		SchedulerIntervalMinutes:      int(defaultMailboxSchedulerInterval.Round(time.Minute).Minutes()),
 		SchedulerRoundIntervalSeconds: int(defaultMailboxSchedulerRoundInterval.Round(time.Second).Seconds()),
 		MailboxPageSize:               10,
@@ -1325,6 +1327,8 @@ func normalizeCreateSettings(ownerID string, settings CreateSettings) CreateSett
 	out.AccountIDs = normalizeAccountIDSelection("", settings.AccountIDs)
 	out.CreateChannel = string(normalizeMailboxCreateChannel(mailboxCreateChannel(strings.ToLower(strings.TrimSpace(settings.CreateChannel)))))
 	out.SchedulerCreateChannel = string(normalizeMailboxCreateChannel(mailboxCreateChannel(strings.ToLower(strings.TrimSpace(settings.SchedulerCreateChannel)))))
+	out.AppleAccountTwoFactorMethod = normalizeAppleTwoFactorMethod(settings.AppleAccountTwoFactorMethod)
+	out.ICloudWebTwoFactorMethod = normalizeAppleTwoFactorMethod(settings.ICloudWebTwoFactorMethod)
 	if out.SchedulerIntervalMinutes < 1 {
 		out.SchedulerIntervalMinutes = defaults.SchedulerIntervalMinutes
 	}

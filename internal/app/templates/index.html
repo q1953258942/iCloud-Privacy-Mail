@@ -1139,21 +1139,35 @@
 
         <section class="view-section panel" data-view="session">
           <div class="panel-head">
-            <h2>保存 Apple 登录态</h2>
+            <h2>Apple 登录</h2>
             <p>Apple 登录态只用于创建隐私邮箱；取验证码请保存下方取码登录。</p>
           </div>
-          <div class="notice" id="icloudSessionInfo">未保存创建登录态。建议先保存新接口登录态；收到 2FA 后提交对应验证码。取码登录会单独保存。</div>
+          <div class="notice" id="icloudSessionInfo">未完成创建登录。建议先点“新接口登录”或“旧接口登录”；收到 2FA 后提交对应验证码。取码登录会单独保存。</div>
           <div class="field-grid">
             <label>Apple ID<input id="protocolAppleId" autocomplete="username" placeholder="name@icloud.com"></label>
             <label>密码<input id="protocolPassword" type="password" autocomplete="current-password" placeholder="Apple ID 密码"></label>
             <label class="full">2FA 验证码<input id="protocol2FA" inputmode="numeric" maxlength="6" placeholder="收到后输入 6 位验证码"></label>
+            <label>新接口验证码方式
+              <select id="appleAccount2FAMethod">
+                <option value="trusted_device">受信任设备</option>
+                <option value="phone">短信/手机号验证码</option>
+              </select>
+            </label>
+            <label>旧接口验证码方式
+              <select id="iCloudWeb2FAMethod">
+                <option value="trusted_device">受信任设备</option>
+                <option value="phone">短信/手机号验证码</option>
+              </select>
+            </label>
           </div>
           <div class="toolbar">
-            <button class="primary" onclick="startAppleAccountLogin()">保存新接口登录态</button>
+            <button class="primary" onclick="startAppleAccountLogin()">新接口登录</button>
             <button id="appleAccount2FAButton" onclick="submitAppleAccount2FA()">提交新接口验证码</button>
-            <button onclick="startProtocolLogin()">保存旧接口登录态</button>
+            <button onclick="startProtocolLogin()">旧接口登录</button>
             <button id="protocol2FAButton" onclick="submitProtocol2FA()">提交旧接口验证码</button>
+            <button type="button" onclick="saveCreateSettings()">保存配置</button>
             <button id="sessionCheckButton" onclick="checkICloudSession()">检测登录态</button>
+            <span id="loginSettingsStatus" class="muted"></span>
           </div>
           <div class="hint">新接口每小时约可创建 20 个，旧接口每小时约可创建 5 个；两种登录态都保存后可一起创建，合计约 25 个/小时。</div>
           <div class="field-grid">
@@ -1552,6 +1566,23 @@
       el.value = normalizeCreateChannelValue(value);
     }
 
+    function normalizeTwoFactorMethodValue(value) {
+      const normalized = String(value || '').trim().toLowerCase();
+      if (['phone', 'sms', 'phone_sms', 'trusted_phone', 'trusted_phone_number'].includes(normalized)) return 'phone';
+      return 'trusted_device';
+    }
+
+    function twoFactorMethodPayloadValue(id) {
+      const el = $(id);
+      return normalizeTwoFactorMethodValue(el ? el.value : '');
+    }
+
+    function setTwoFactorMethodSelect(id, value) {
+      const el = $(id);
+      if (!el) return;
+      el.value = normalizeTwoFactorMethodValue(value);
+    }
+
     function collectCreateSettingsPayload() {
       return {
         label: $('protoLabel') ? $('protoLabel').value.trim() : '',
@@ -1559,6 +1590,8 @@
         account_ids: [...selectedCreateAccountIDs].filter(Boolean),
         create_channel: createChannelPayloadValue('createChannelSelect'),
         scheduler_create_channel: createChannelPayloadValue('scheduleCreateChannelSelect'),
+        apple_account_two_factor_method: twoFactorMethodPayloadValue('appleAccount2FAMethod'),
+        icloud_web_two_factor_method: twoFactorMethodPayloadValue('iCloudWeb2FAMethod'),
         scheduler_interval_minutes: boundedInt('scheduleIntervalMinutes', 60, 1, 1440),
         scheduler_round_interval_seconds: boundedInt('scheduleRoundIntervalSeconds', 5, 1, 600),
         mailbox_page_size: boundedInt('mailboxPageSize', 10, 1, 500)
@@ -1570,6 +1603,8 @@
       if ($('protoNote')) $('protoNote').value = settings.note || '';
       setCreateChannelSelect('createChannelSelect', settings.create_channel);
       setCreateChannelSelect('scheduleCreateChannelSelect', settings.scheduler_create_channel);
+      setTwoFactorMethodSelect('appleAccount2FAMethod', settings.apple_account_two_factor_method);
+      setTwoFactorMethodSelect('iCloudWeb2FAMethod', settings.icloud_web_two_factor_method);
       if ($('scheduleIntervalMinutes')) $('scheduleIntervalMinutes').value = String(settings.scheduler_interval_minutes || 60);
       if ($('scheduleRoundIntervalSeconds')) $('scheduleRoundIntervalSeconds').value = String(settings.scheduler_round_interval_seconds || 5);
       mailboxPageSize = Math.max(1, Math.min(500, Number(settings.mailbox_page_size || 10)));
@@ -1587,20 +1622,26 @@
       if ($('createSettingsStatus')) {
         $('createSettingsStatus').textContent = '已读取服务器配置';
       }
+      if ($('loginSettingsStatus')) {
+        $('loginSettingsStatus').textContent = '已读取服务器配置';
+      }
     }
 
     async function saveCreateSettings() {
       const button = $('saveCreateSettingsButton');
       if (button) button.disabled = true;
       if ($('createSettingsStatus')) $('createSettingsStatus').textContent = '保存中...';
+      if ($('loginSettingsStatus')) $('loginSettingsStatus').textContent = '保存中...';
       try {
         const data = await api('/api/create-settings', {method:'POST', body: JSON.stringify(collectCreateSettingsPayload())});
         applyCreateSettings(data.settings || {});
         const message = data.message || '创建配置已保存到服务器';
         if ($('createSettingsStatus')) $('createSettingsStatus').textContent = message;
+        if ($('loginSettingsStatus')) $('loginSettingsStatus').textContent = message;
         log(message);
       } catch (err) {
         if ($('createSettingsStatus')) $('createSettingsStatus').textContent = '保存失败：' + err.message;
+        if ($('loginSettingsStatus')) $('loginSettingsStatus').textContent = '保存失败：' + err.message;
         log('保存创建配置失败：' + err.message);
       } finally {
         if (button) button.disabled = false;
@@ -1772,7 +1813,7 @@
       syncCreateAccountSelection(sessions);
       if (sessions.length === 0) {
         box.className = 'create-account-selector muted';
-        box.textContent = '未保存可用于创建的 Apple 登录态；请先保存新接口登录态或旧接口登录态。';
+        box.textContent = '未保存可用于创建的 Apple 登录；请先点“新接口登录”或“旧接口登录”。';
         return;
       }
       box.className = 'create-account-selector';
@@ -2475,7 +2516,7 @@
       lastICloudSessions = allSessions;
       const displaySessions = visibleICloudSessions(allSessions);
       if (displaySessions.length === 0) {
-        $('icloudSessionInfo').textContent = '未保存创建登录态。请输入 Apple ID/密码保存新接口或旧接口；取码请单独保存取码登录。';
+        $('icloudSessionInfo').textContent = '未完成创建登录。请输入 Apple ID/密码后选择新接口或旧接口登录；取码请单独保存取码登录。';
         renderCreateAccountSelector();
         return;
       }
@@ -2606,7 +2647,8 @@
       const appleId = $('protocolAppleId').value.trim();
       const data = await api('/api/icloud/protocol-login/start', {method:'POST', body: JSON.stringify({
         apple_id: appleId,
-        password: $('protocolPassword').value
+        password: $('protocolPassword').value,
+        two_factor_method: twoFactorMethodPayloadValue('iCloudWeb2FAMethod')
       })});
       $('protocolPassword').value = '';
       if (data.needs_2fa) {
@@ -2623,8 +2665,8 @@
 
     async function submitProtocol2FA() {
       if (!protocolPendingID) {
-        log('没有待验证的旧接口登录，请先点击“保存旧接口登录态”');
-        $('icloudSessionInfo').textContent = '没有待验证的旧接口登录，请先点击“保存旧接口登录态”。';
+        log('没有待验证的旧接口登录，请先点击“旧接口登录”');
+        $('icloudSessionInfo').textContent = '没有待验证的旧接口登录，请先点击“旧接口登录”。';
         return;
       }
       const code = $('protocol2FA').value.trim();
@@ -2661,7 +2703,8 @@
       const appleId = $('protocolAppleId').value.trim();
       const data = await api('/api/apple-account/login/start', {method:'POST', body: JSON.stringify({
         apple_id: appleId,
-        password: $('protocolPassword').value
+        password: $('protocolPassword').value,
+        two_factor_method: twoFactorMethodPayloadValue('appleAccount2FAMethod')
       })});
       $('protocolPassword').value = '';
       if (data.needs_2fa) {
@@ -2678,8 +2721,8 @@
 
     async function submitAppleAccount2FA() {
       if (!appleAccountPendingID) {
-        log('没有待验证的新接口登录，请先点击“保存新接口登录态”');
-        $('icloudSessionInfo').textContent = '没有待验证的新接口登录，请先点击“保存新接口登录态”。';
+        log('没有待验证的新接口登录，请先点击“新接口登录”');
+        $('icloudSessionInfo').textContent = '没有待验证的新接口登录，请先点击“新接口登录”。';
         return;
       }
       const code = $('protocol2FA').value.trim();
