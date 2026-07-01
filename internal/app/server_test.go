@@ -2193,6 +2193,139 @@ func TestSaveICloudIMAPLoginStoresStateWithoutReturningPassword(t *testing.T) {
 	}
 }
 
+func TestSaveICloudIMAPLoginCanAttachICloudMailAliasToDifferentAppleID(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{}, store, discardLogger())
+	server := handler.(*Server)
+	var checkedEmail, checkedPassword string
+	server.checkIMAPLogin = func(ctx context.Context, email, appPassword string) error {
+		checkedEmail = email
+		checkedPassword = appPassword
+		return nil
+	}
+	cookie, user := registerTestUser(t, handler, "imap-alias-user", "imap123")
+
+	primaryAppleID := "1953258942@qq.com"
+	if err := store.SaveICloudSessionForOwner(user.ID, ICloudSession{
+		OwnerID: user.ID,
+		AppleID: primaryAppleID,
+		LoginStates: []LoginState{{
+			Kind:    LoginStateAppleAccount,
+			Host:    "appleid.apple.com",
+			Origin:  "https://account.apple.com",
+			APIKey:  "api-key",
+			Scnt:    "scnt",
+			SavedAt: time.Now(),
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessions := store.ICloudSessionsForOwner(user.ID)
+	if len(sessions) != 1 || strings.TrimSpace(sessions[0].AccountID) == "" {
+		t.Fatalf("seed sessions = %+v", sessions)
+	}
+	accountID := sessions[0].AccountID
+	if err := store.SaveICloudSessionForOwner(user.ID, ICloudSession{
+		OwnerID: user.ID,
+		AppleID: "q1953258942@icloud.com",
+		LoginStates: []LoginState{{
+			Kind:            LoginStateICloudIMAP,
+			IMAPEmail:       "q1953258942@icloud.com",
+			IMAPAppPassword: "old-secret",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if sessions := store.ICloudSessionsForOwner(user.ID); len(sessions) != 2 {
+		t.Fatalf("seed sessions len = %d, want 2", len(sessions))
+	}
+
+	rr := httptest.NewRecorder()
+	payload := fmt.Sprintf(`{"account_id":%q,"email":"Q1953258942@iCloud.com","app_password":"app-secret"}`, accountID)
+	req := httptest.NewRequest(http.MethodPost, "/api/icloud/imap-login/save", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("save imap alias status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if checkedEmail != "q1953258942@icloud.com" || checkedPassword != "app-secret" {
+		t.Fatalf("checked credentials = %q/%q", checkedEmail, checkedPassword)
+	}
+	var body struct {
+		Session publicICloudSession `json:"session"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Session.AccountID != accountID || body.Session.AppleID != primaryAppleID {
+		t.Fatalf("response session = %+v, want account %s apple id %s", body.Session, accountID, primaryAppleID)
+	}
+	if !body.Session.ICloudIMAPLoginSaved || body.Session.ICloudIMAPEmail != "q1953258942@icloud.com" {
+		t.Fatalf("response imap state = %+v", body.Session)
+	}
+	sessions = store.ICloudSessionsForOwner(user.ID)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions len = %d, want 1: %+v", len(sessions), sessions)
+	}
+	if accounts := store.SnapshotForOwner(user.ID).Accounts; len(accounts) != 1 {
+		t.Fatalf("accounts len = %d, want 1: %+v", len(accounts), accounts)
+	}
+	if sessions[0].AppleID != primaryAppleID || sessions[0].AccountID != accountID {
+		t.Fatalf("stored session identity = %+v", sessions[0])
+	}
+	state, ok := iCloudIMAPLoginState(sessions[0])
+	if !ok || state.IMAPEmail != "q1953258942@icloud.com" || state.IMAPAppPassword != "app-secret" {
+		t.Fatalf("stored imap state = %+v ok=%v", state, ok)
+	}
+}
+
+func TestSaveICloudIMAPLoginMatchesCreateAccountByEmailLocalPart(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{}, store, discardLogger())
+	server := handler.(*Server)
+	server.checkIMAPLogin = func(ctx context.Context, email, appPassword string) error {
+		return nil
+	}
+	cookie, user := registerTestUser(t, handler, "imap-localpart-user", "imap123")
+
+	primaryAppleID := "qq1953258942@gmail.com"
+	if err := store.SaveICloudSessionForOwner(user.ID, ICloudSession{
+		OwnerID: user.ID,
+		AppleID: primaryAppleID,
+		LoginStates: []LoginState{{
+			Kind:   LoginStateAppleAccount,
+			Host:   "appleid.apple.com",
+			Origin: "https://account.apple.com",
+			APIKey: "api-key",
+			Scnt:   "scnt",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	accountID := store.ICloudSessionsForOwner(user.ID)[0].AccountID
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/icloud/imap-login/save", strings.NewReader(`{"email":"qq1953258942@icloud.com","app_password":"app-secret"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("save imap alias status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	sessions := store.ICloudSessionsForOwner(user.ID)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions len = %d, want 1: %+v", len(sessions), sessions)
+	}
+	if sessions[0].AccountID != accountID || sessions[0].AppleID != primaryAppleID {
+		t.Fatalf("stored session identity = %+v", sessions[0])
+	}
+	state, ok := iCloudIMAPLoginState(sessions[0])
+	if !ok || state.IMAPEmail != "qq1953258942@icloud.com" {
+		t.Fatalf("stored imap state = %+v ok=%v", state, ok)
+	}
+}
+
 func TestSaveICloudIMAPLoginFailureDoesNotStorePassword(t *testing.T) {
 	store := newTestStore(t)
 	handler := NewServer(Config{}, store, discardLogger())

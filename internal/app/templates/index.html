@@ -1420,14 +1420,15 @@
     }
 
     function updateNavCounts(status = {}) {
-      const accountTotal = Math.max(Number(status.accounts || 0), lastICloudSessions.length);
+      const visibleSessionTotal = visibleICloudSessions(lastICloudSessions).length;
+      const accountTotal = Math.max(Number(status.accounts || 0), visibleSessionTotal);
       const mailboxTotal = Number(lastMailboxPagination.total_all || status.mailboxes || lastMailboxes.length || 0);
       const set = (id, value) => {
         const el = $(id);
         if (el) el.textContent = String(value);
       };
       set('navOverviewCount', accountTotal);
-      set('navSessionCount', lastICloudSessions.length);
+      set('navSessionCount', visibleSessionTotal);
       set('navMailboxCount', mailboxTotal);
     }
 
@@ -1609,8 +1610,18 @@
       }
     }
 
+    function createLoginSaved(session) {
+      return appleAccountLoginSaved(session) || iCloudWebLoginSaved(session);
+    }
+
+    function visibleICloudSessions(sessions) {
+      const saved = (sessions || []).filter(session => session && session.saved);
+      const createSessions = saved.filter(createLoginSaved);
+      return createSessions.length > 0 ? createSessions : saved;
+    }
+
     function selectableCreateSessions() {
-      return (lastICloudSessions || []).filter(session => session && session.saved && session.account_id && (appleAccountLoginSaved(session) || iCloudWebLoginSaved(session)));
+      return (lastICloudSessions || []).filter(session => session && session.saved && session.account_id && createLoginSaved(session));
     }
 
     function createAccountDisplayName(session) {
@@ -2275,7 +2286,7 @@
         .filter(group => group.account_id)
         .map(group => [group.account_id, Number(group.count || 0)]));
       const syncChoices = (lastICloudSessions || [])
-        .filter(session => session && session.saved && session.account_id)
+        .filter(session => session && session.saved && session.account_id && createLoginSaved(session))
         .map(session => ({
           id: session.account_id,
           title: createAccountDisplayName(session),
@@ -2517,18 +2528,19 @@
     }
 
     function renderICloudSessions(sessions) {
-      sessions = (sessions || []).filter(session => session && session.saved);
-      lastICloudSessions = sessions;
-      if (sessions.length === 0) {
+      const allSessions = (sessions || []).filter(session => session && session.saved);
+      lastICloudSessions = allSessions;
+      const displaySessions = visibleICloudSessions(allSessions);
+      if (displaySessions.length === 0) {
         $('icloudSessionInfo').textContent = '未保存创建登录态。请输入 Apple ID/密码保存新接口或旧接口；取码请单独保存取码登录。';
         renderCreateAccountSelector();
         return;
       }
-      if (!activeICloudSessionKey || !sessions.some(session => sessionKey(session) === activeICloudSessionKey)) {
-        activeICloudSessionKey = sessionKey(sessions[0]);
+      if (!activeICloudSessionKey || !displaySessions.some(session => sessionKey(session) === activeICloudSessionKey)) {
+        activeICloudSessionKey = sessionKey(displaySessions[0]);
       }
-      const active = sessions.find(session => sessionKey(session) === activeICloudSessionKey) || sessions[0];
-      const tabs = sessions.map((session, index) => {
+      const active = displaySessions.find(session => sessionKey(session) === activeICloudSessionKey) || displaySessions[0];
+      const tabs = displaySessions.map((session, index) => {
         const key = sessionKey(session);
         const title = session.apple_id || session.account_id || `账号 ${index + 1}`;
         return `<button class="${key === activeICloudSessionKey ? 'active' : ''}" onclick="setICloudSessionTab(${esc(JSON.stringify(key))})">${esc(title)}</button>`;
@@ -2537,7 +2549,7 @@
         ? `<br>取码邮箱：${esc(active.icloud_imap_email || active.apple_id || '-')} ${active.icloud_imap_host ? `<span class="muted">/ ${esc(active.icloud_imap_host)}</span>` : ''}`
         : '';
       $('icloudSessionInfo').innerHTML =
-        `<div>已保存 ${sessions.length} 个 Apple 登录态，Apple 登录态只用于创建邮箱；取码走取码登录。</div>` +
+        `<div>已保存 ${displaySessions.length} 个 Apple 登录态，Apple 登录态只用于创建邮箱；取码走取码登录。</div>` +
         `<div class="session-tabs">${tabs}</div>` +
         `<div class="session-card"><div class="session-card-line"><span>Apple ID：${esc(active.apple_id || '-')}</span>${sessionManageRefreshBadge(active)}</div>` +
         `账号ID：${esc(active.account_id || '-')}${imapInfo}<br>` +
@@ -2554,6 +2566,17 @@
     function setICloudSessionTab(key) {
       activeICloudSessionKey = key || '';
       renderICloudSessions(lastICloudSessions);
+    }
+
+    function activeICloudSessionForBinding() {
+      const displaySessions = visibleICloudSessions(lastICloudSessions);
+      return displaySessions.find(session => sessionKey(session) === activeICloudSessionKey) || displaySessions[0] || null;
+    }
+
+    function activeICloudSessionAccountID() {
+      const session = activeICloudSessionForBinding();
+      if (!session || !createLoginSaved(session)) return '';
+      return session.account_id || '';
     }
 
     async function syncICloudMailboxes() {
@@ -2597,6 +2620,7 @@
       $('imapLoginStatus').textContent = '正在检测 IMAP 取码登录...';
       try {
         const data = await api('/api/icloud/imap-login/save', {method:'POST', body: JSON.stringify({
+          account_id: activeICloudSessionAccountID(),
           email,
           app_password: appPassword
         })});

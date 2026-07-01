@@ -1027,10 +1027,14 @@ func (s *Server) handleSaveICloudIMAPLogin(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	sessions := s.publicSessionsForOwner(ownerID)
+	publicSession := publicSessionForAccountID(sessions, session.AccountID)
+	if strings.TrimSpace(session.AccountID) == "" {
+		publicSession = publicSessionForAppleID(sessions, session.AppleID)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":  true,
 		"message":  "取码登录已保存并检测正常",
-		"session":  publicSessionForAppleID(sessions, email),
+		"session":  publicSession,
 		"sessions": sessions,
 	})
 }
@@ -1119,21 +1123,46 @@ func (s *Server) sessionForIMAPSave(ownerID, accountID, email string) (ICloudSes
 	accountID = strings.TrimSpace(accountID)
 	email = normalizeICloudIMAPEmail(email)
 	if accountID != "" {
+		accountAppleID := ""
 		if account, ok := s.store.FindAccountByID(accountID); ok {
-			accountEmail := normalizeICloudIMAPEmail(account.AppleID)
-			if accountEmail != "" && email != "" && !strings.EqualFold(accountEmail, email) {
-				return ICloudSession{}, errCode("imap_account_mismatch", "App 专用密码邮箱和所选 Apple 账号不一致", false)
-			}
+			accountAppleID = strings.TrimSpace(account.AppleID)
 		}
 		if session, ok := s.sessionForOwnerAccount(ownerID, accountID); ok {
+			session.AppleID = firstNonEmpty(strings.TrimSpace(session.AppleID), accountAppleID, email)
 			return session, nil
 		}
-		return ICloudSession{OwnerID: ownerID, AccountID: accountID, AppleID: email}, nil
+		return ICloudSession{OwnerID: ownerID, AccountID: accountID, AppleID: firstNonEmpty(accountAppleID, email)}, nil
+	}
+	if session, ok := s.sessionForOwnerCreateEmailLocalPart(ownerID, email); ok {
+		return session, nil
 	}
 	if session, ok := s.sessionForOwnerIMAPEmail(ownerID, email); ok {
 		return session, nil
 	}
 	return ICloudSession{OwnerID: ownerID, AppleID: email}, nil
+}
+
+func (s *Server) sessionForOwnerCreateEmailLocalPart(ownerID, email string) (ICloudSession, bool) {
+	local := emailLocalPart(email)
+	if local == "" {
+		return ICloudSession{}, false
+	}
+	var match ICloudSession
+	found := false
+	for _, session := range s.sessionsForOwner(ownerID, "") {
+		if !appleAccountLoginSaved(session) && !iCloudWebLoginSaved(session) {
+			continue
+		}
+		if !strings.EqualFold(emailLocalPart(session.AppleID), local) {
+			continue
+		}
+		if found && !sameICloudSessionPublicIdentity(match, session) {
+			return ICloudSession{}, false
+		}
+		match = session
+		found = true
+	}
+	return match, found
 }
 
 func (s *Server) sessionForOwnerIMAPEmail(ownerID, email string) (ICloudSession, bool) {
@@ -1147,6 +1176,27 @@ func (s *Server) sessionForOwnerIMAPEmail(ownerID, email string) (ICloudSession,
 		}
 	}
 	return ICloudSession{}, false
+}
+
+func emailLocalPart(value string) string {
+	value = normalizeICloudIMAPEmail(value)
+	if value == "" {
+		return ""
+	}
+	if at := strings.Index(value, "@"); at > 0 {
+		return value[:at]
+	}
+	return ""
+}
+
+func sameICloudSessionPublicIdentity(a, b ICloudSession) bool {
+	if strings.TrimSpace(a.AccountID) != "" && strings.TrimSpace(b.AccountID) != "" {
+		return constantTimeEqual(a.AccountID, b.AccountID)
+	}
+	if strings.TrimSpace(a.AppleID) != "" && strings.TrimSpace(b.AppleID) != "" {
+		return strings.EqualFold(strings.TrimSpace(a.AppleID), strings.TrimSpace(b.AppleID))
+	}
+	return false
 }
 
 func checkSavedLoginStates(ctx context.Context, client *ICloudClient, session ICloudSession, checkedAt time.Time) (ICloudSession, bool, error) {
@@ -3946,6 +3996,19 @@ func publicSessionForAppleID(sessions []publicICloudSession, appleID string) pub
 	appleID = strings.TrimSpace(appleID)
 	for _, session := range sessions {
 		if appleID != "" && strings.EqualFold(strings.TrimSpace(session.AppleID), appleID) {
+			return session
+		}
+	}
+	if len(sessions) > 0 {
+		return sessions[0]
+	}
+	return publicSession(nil)
+}
+
+func publicSessionForAccountID(sessions []publicICloudSession, accountID string) publicICloudSession {
+	accountID = strings.TrimSpace(accountID)
+	for _, session := range sessions {
+		if accountID != "" && constantTimeEqual(strings.TrimSpace(session.AccountID), accountID) {
 			return session
 		}
 	}
