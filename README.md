@@ -171,7 +171,11 @@ http://127.0.0.1:8787/login
 ### 4. 同步邮件和取验证码
 
 - 面板可手动点击 `同步邮件`。
-- 对外取码 API 会先尝试同步 iCloud 最新邮件，再从本地状态中提取最新 6 位验证码。
+- 服务启动后会默认启用后台取码同步器；所有 `API active`、`iCloud active` 且有旧接口登录态的邮箱会自动进入同步池，不需要先访问取码 API 才开始监听。
+- 当前 Go 实现没有 iCloud IMAP app-specific password，不能直接使用 IMAP `exists` 事件；后端用已保存的 iCloud Mail `mccgateway` 登录态按账号批量预同步最近验证码邮件，等价实现“邮件先入库，取码 API 读本地”的数据流。
+- 后台同步默认 3 秒一轮；最近被取码 API 访问过的邮箱会被排到本轮前面并立即唤醒同步器，目标是邮件到达后 5-10 秒内进入本地库。
+- 对外取码 API 会先读取本地已同步邮件；未命中时触发后台快速补抓，普通请求默认最多等待 600ms，带 `wait_ms` 时最多可等待 30 秒，仍未命中就让调用方继续轮询。
+- 后台同步器或快速补抓完成后都会写入本地状态，下一次取码轮询通常直接从本地返回验证码。
 - 普通取码成功后会记录本次返回的邮件 ID；同一封验证码邮件不会被默认重复返回，避免重新发码后仍命中旧码。
 - 建议调用取码 API 时带 `after=<RFC3339>`，避免拿到历史旧码。
 
@@ -196,8 +200,21 @@ GET /api/mailboxes/{id}/code?key=<mailbox_key>&after=<RFC3339>&keyword=OpenAI
 | `key` | 必填；单邮箱独立 key |
 | `after` | 建议必填；只返回该时间之后的新验证码 |
 | `keyword` | 邮件关键词，默认 `OpenAI` |
+| `wait_ms` | 可选；本地未命中时最多等待后台补抓多久，最大 30000；面板复制的 API 默认带 `12000` |
 | `allow_stale` | 默认 false；只有排障时才建议打开，允许同步失败后回退本地缓存旧码 |
 | `cache` | 默认 false；设为 `1/true` 时只读本地缓存，允许查看已返回过的旧验证码，不触发 iCloud 同步 |
+
+取码提速相关配置：
+
+| 配置 | 默认值 | 说明 |
+| --- | --- | --- |
+| `mail_watcher_enabled` / `MAIL_WATCHER_ENABLED` | `true` | 是否启用后台取码同步器 |
+| `mail_watcher_poll_ms` / `MAIL_WATCHER_POLL_MS` | `3000` | 后台取码同步器轮询间隔 |
+| `mail_watcher_fetch_limit` / `MAIL_WATCHER_FETCH_LIMIT` | `8` | 后台同步每轮最多扫描最近多少个邮件线程 |
+| `mail_watcher_initial_fetch_limit` / `MAIL_WATCHER_INITIAL_FETCH_LIMIT` | `20` | 服务启动时预抓最近多少个邮件线程 |
+| `mail_watcher_lookback_hours` / `MAIL_WATCHER_LOOKBACK_HOURS` | `24` | 服务启动首次预抓向前回看多少小时 |
+| `public_fast_sync_wait_ms` / `PUBLIC_FAST_SYNC_WAIT_MS` | `600` | 取码 API 本地未命中后，最多等待后台快速同步多久 |
+| `public_sync_min_interval_ms` / `PUBLIC_SYNC_MIN_INTERVAL_MS` | `3000` | 同一用户下 iCloud 邮件同步的最小间隔，避免前端高频轮询打满 Apple 接口 |
 
 成功响应：
 

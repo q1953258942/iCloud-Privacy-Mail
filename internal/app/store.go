@@ -1151,6 +1151,7 @@ func defaultCreateSettings(ownerID string) CreateSettings {
 		SchedulerCreateChannel:        string(mailboxCreateChannelAuto),
 		SchedulerIntervalMinutes:      int(defaultMailboxSchedulerInterval.Round(time.Minute).Minutes()),
 		SchedulerRoundIntervalSeconds: int(defaultMailboxSchedulerRoundInterval.Round(time.Second).Seconds()),
+		MailboxPageSize:               10,
 	}
 }
 
@@ -1174,6 +1175,12 @@ func normalizeCreateSettings(ownerID string, settings CreateSettings) CreateSett
 	}
 	if out.SchedulerRoundIntervalSeconds > 600 {
 		out.SchedulerRoundIntervalSeconds = 600
+	}
+	if out.MailboxPageSize < 1 {
+		out.MailboxPageSize = defaults.MailboxPageSize
+	}
+	if out.MailboxPageSize > 500 {
+		out.MailboxPageSize = 500
 	}
 	return out
 }

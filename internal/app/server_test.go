@@ -47,6 +47,33 @@ func TestExtractOTP(t *testing.T) {
 	}
 }
 
+func testIMAPSession(ownerID, accountID, email string) ICloudSession {
+	email = normalizeICloudIMAPEmail(email)
+	if email == "" {
+		email = "receiver@example.com"
+	}
+	return ICloudSession{
+		OwnerID:   ownerID,
+		AccountID: accountID,
+		AppleID:   email,
+		SavedAt:   time.Now(),
+		LoginStates: []LoginState{{
+			Kind:              LoginStateICloudIMAP,
+			Host:              defaultICloudIMAPHost,
+			Origin:            "imaps://" + defaultICloudIMAPHost,
+			SavedAt:           time.Now(),
+			IMAPEmail:         email,
+			IMAPUsername:      email,
+			IMAPHost:          defaultICloudIMAPHost,
+			IMAPPort:          defaultICloudIMAPPort,
+			IMAPAppPassword:   "app-specific-password",
+			LastCheckedAt:     time.Now(),
+			LastCheckOK:       true,
+			LastStatusMessage: "取码登录正常",
+		}},
+	}
+}
+
 func TestGenerateAppleHashcash(t *testing.T) {
 	challenge := "0123456789abcdef0123456789abcdef"
 	now := time.Date(2026, 6, 29, 14, 2, 22, 0, time.UTC)
@@ -243,6 +270,26 @@ func TestAppleAccountAPIErrorDoesNotTreatGenericHTTPAsAuthExpired(t *testing.T) 
 	expired := appleAccountAPIError(http.StatusUnauthorized, []byte(`{"service_errors":[{"message":"authentication_failed"}]}`), "测试阶段")
 	if !isCodedError(expired, "apple_account_auth_failed") {
 		t.Fatalf("explicit auth error = %v, want apple_account_auth_failed", expired)
+	}
+}
+
+func TestLoadConfigPublicCodeSyncSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"mail_watcher_enabled":false,"mail_watcher_poll_ms":2500,"mail_watcher_fetch_limit":6,"mail_watcher_initial_fetch_limit":16,"mail_watcher_lookback_hours":12,"public_fast_sync_wait_ms":250,"public_sync_min_interval_ms":1500}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MailWatcherEnabled {
+		t.Fatal("mail watcher enabled = true, want false from config")
+	}
+	if cfg.MailWatcherPollMS != 2500 || cfg.MailWatcherFetchLimit != 6 || cfg.MailWatcherInitialFetchLimit != 16 || cfg.MailWatcherLookbackHours != 12 {
+		t.Fatalf("mail watcher settings = poll:%d fetch:%d initial:%d lookback:%d, want 2500/6/16/12", cfg.MailWatcherPollMS, cfg.MailWatcherFetchLimit, cfg.MailWatcherInitialFetchLimit, cfg.MailWatcherLookbackHours)
+	}
+	if cfg.PublicFastSyncWaitMS != 250 || cfg.PublicSyncMinIntervalMS != 1500 {
+		t.Fatalf("public sync settings = fast:%d min:%d, want 250/1500", cfg.PublicFastSyncWaitMS, cfg.PublicSyncMinIntervalMS)
 	}
 }
 
@@ -2094,6 +2141,83 @@ func TestLooksLikeVerificationText(t *testing.T) {
 	}
 }
 
+func TestIMAPQuoteEscapesUnsafeCharacters(t *testing.T) {
+	got := imapQuote("a\"b\\c\r\n")
+	if got != `"a\"b\\c"` {
+		t.Fatalf("imapQuote() = %q", got)
+	}
+}
+
+func TestSaveICloudIMAPLoginStoresStateWithoutReturningPassword(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{}, store, discardLogger())
+	server := handler.(*Server)
+	var checkedEmail, checkedPassword string
+	server.checkIMAPLogin = func(ctx context.Context, email, appPassword string) error {
+		checkedEmail = email
+		checkedPassword = appPassword
+		return nil
+	}
+	cookie, user := registerTestUser(t, handler, "imap-user", "imap123")
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/icloud/imap-login/save", strings.NewReader(`{"email":"IMAP.User@iCloud.com","app_password":"app-secret"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("save imap login status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if checkedEmail != "imap.user@icloud.com" || checkedPassword != "app-secret" {
+		t.Fatalf("checked credentials = %q/%q", checkedEmail, checkedPassword)
+	}
+	if strings.Contains(rr.Body.String(), "app-secret") {
+		t.Fatalf("response leaked app password: %s", rr.Body.String())
+	}
+	var body struct {
+		Session publicICloudSession `json:"session"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Session.ICloudIMAPLoginSaved || !body.Session.ICloudIMAPLoginOK || body.Session.ICloudIMAPEmail != "imap.user@icloud.com" {
+		t.Fatalf("public session missing imap state: %+v", body.Session)
+	}
+	sessions := store.ICloudSessionsForOwner(user.ID)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions len = %d, want 1", len(sessions))
+	}
+	state, ok := iCloudIMAPLoginState(sessions[0])
+	if !ok || state.IMAPEmail != "imap.user@icloud.com" || state.IMAPAppPassword != "app-secret" || !state.LastCheckOK {
+		t.Fatalf("saved imap state = %+v ok=%v", state, ok)
+	}
+}
+
+func TestSaveICloudIMAPLoginFailureDoesNotStorePassword(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{}, store, discardLogger())
+	server := handler.(*Server)
+	server.checkIMAPLogin = func(ctx context.Context, email, appPassword string) error {
+		return errCode("imap_login_failed", "IMAP 登录失败", false)
+	}
+	cookie, user := registerTestUser(t, handler, "imap-fail", "imap123")
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/icloud/imap-login/save", strings.NewReader(`{"email":"fail@icloud.com","app_password":"bad-secret"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("save imap login failure status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "bad-secret") {
+		t.Fatalf("error response leaked app password: %s", rr.Body.String())
+	}
+	if sessions := store.ICloudSessionsForOwner(user.ID); len(sessions) != 0 {
+		t.Fatalf("sessions len = %d, want 0", len(sessions))
+	}
+}
+
 func TestSetMailboxSyncCursor(t *testing.T) {
 	store := newTestStore(t)
 	mailbox, err := store.AddMailbox("", "UPI-1", "alias@icloud.com")
@@ -2674,11 +2798,7 @@ func TestMailboxCodeQuerySyncsBeforeReturningCachedOldCode(t *testing.T) {
 
 	store := newTestStore(t)
 	ownerID := "owner-code-fresh"
-	if err := store.SaveICloudSessionForOwner(ownerID, ICloudSession{
-		OwnerID: ownerID,
-		DSID:    "123",
-		Cookies: []SessionCookie{{Name: "session", Value: "x"}},
-	}); err != nil {
+	if err := store.SaveICloudSessionForOwner(ownerID, testIMAPSession(ownerID, "", "receiver-fresh@icloud.com")); err != nil {
 		t.Fatal(err)
 	}
 	mailbox, err := store.AddMailboxForOwner(ownerID, "", "UPI-1", "alias@icloud.com")
@@ -2692,7 +2812,7 @@ func TestMailboxCodeQuerySyncsBeforeReturningCachedOldCode(t *testing.T) {
 	handler := NewServer(Config{}, store, discardLogger())
 	server := handler.(*Server)
 	var calls int64
-	server.syncMailboxBatch = func(ctx context.Context, session ICloudSession, mailboxes []Mailbox, after time.Time, keyword string, maxThreads int) (map[string][]ICloudSyncedMessage, error) {
+	server.syncCodeMailboxBatch = func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (map[string][]ICloudSyncedMessage, error) {
 		atomic.AddInt64(&calls, 1)
 		return map[string][]ICloudSyncedMessage{
 			mailbox.ID: {{
@@ -2706,7 +2826,8 @@ func TestMailboxCodeQuerySyncsBeforeReturningCachedOldCode(t *testing.T) {
 	}
 
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/mailboxes/"+url.PathEscape(mailbox.Email)+"/code?key="+mailbox.APIToken, nil)
+	lookupAfter := time.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339Nano)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mailboxes/"+url.PathEscape(mailbox.Email)+"/code?key="+mailbox.APIToken+"&after="+url.QueryEscape(lookupAfter), nil)
 	handler.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("code request = %d body=%s", rr.Code, rr.Body.String())
@@ -2734,6 +2855,291 @@ func TestMailboxCodeQuerySyncsBeforeReturningCachedOldCode(t *testing.T) {
 	}
 }
 
+func TestMailboxCodeQueryReturnsLocalCachedCodeBeforeSync(t *testing.T) {
+	oldInterval := mailboxMailSyncMinInterval
+	mailboxMailSyncMinInterval = 0
+	t.Cleanup(func() { mailboxMailSyncMinInterval = oldInterval })
+
+	store := newTestStore(t)
+	ownerID := "owner-code-local-first"
+	if err := store.SaveICloudSessionForOwner(ownerID, testIMAPSession(ownerID, "", "receiver-local@icloud.com")); err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := store.AddMailboxForOwner(ownerID, "", "UPI-1", "alias@icloud.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddMessage(mailbox.ID, "ChatGPT code", "noreply@example.com", "Use 333333 to continue.", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewServer(Config{}, store, discardLogger())
+	server := handler.(*Server)
+	var calls int64
+	server.syncCodeMailboxBatch = func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (map[string][]ICloudSyncedMessage, error) {
+		atomic.AddInt64(&calls, 1)
+		return nil, nil
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mailboxes/"+url.PathEscape(mailbox.Email)+"/code?key="+mailbox.APIToken, nil)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code request = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Success bool   `json:"success"`
+		Code    string `json:"code"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Success || body.Code != "333333" {
+		t.Fatalf("code body = %+v, want local cached 333333", body)
+	}
+	if got := atomic.LoadInt64(&calls); got != 0 {
+		t.Fatalf("sync calls = %d, want 0", got)
+	}
+}
+
+func TestMailWatcherPreloadsCodeMessages(t *testing.T) {
+	oldInterval := mailboxMailSyncMinInterval
+	mailboxMailSyncMinInterval = 0
+	t.Cleanup(func() { mailboxMailSyncMinInterval = oldInterval })
+
+	store := newTestStore(t)
+	ownerID := "owner-mail-watcher"
+	accountID := "acc-mail-watcher"
+	if err := store.SaveICloudSessionForOwner(ownerID, testIMAPSession(ownerID, accountID, "watcher-owner@icloud.com")); err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := store.AddMailboxForOwner(ownerID, accountID, "UPI-1", "watcher@icloud.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewServer(Config{
+		MailWatcherEnabled:           true,
+		MailWatcherFetchLimit:        8,
+		MailWatcherInitialFetchLimit: 20,
+		MailWatcherLookbackHours:     24,
+		PublicSyncMinIntervalMS:      1,
+	}, store, discardLogger())
+	server := handler.(*Server)
+	var gotMaxThreads int
+	var gotAfter time.Time
+	server.syncCodeMailboxBatch = func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (map[string][]ICloudSyncedMessage, error) {
+		gotMaxThreads = maxMessages
+		gotAfter = after
+		if len(mailboxes) != 1 || mailboxes[0].ID != mailbox.ID {
+			t.Fatalf("mailboxes = %+v, want only %s", mailboxes, mailbox.ID)
+		}
+		return map[string][]ICloudSyncedMessage{
+			mailbox.ID: {{
+				RemoteID:   "remote-watcher",
+				UID:        "10",
+				Subject:    "ChatGPT code",
+				Body:       "Use 555555 to continue.",
+				ReceivedAt: time.Now(),
+			}},
+		}, nil
+	}
+
+	server.markMailWatcherActive(mailbox.ID)
+	server.syncMailWatcherRound(context.Background(), true)
+	if gotMaxThreads != 20 {
+		t.Fatalf("maxThreads = %d, want initial fetch limit 20", gotMaxThreads)
+	}
+	if gotAfter.IsZero() || time.Since(gotAfter) < 23*time.Hour {
+		t.Fatalf("watcher initial after = %v, want roughly 24h lookback", gotAfter)
+	}
+	if msg, code, ok := latestMailboxCode(store.MessagesForMailbox(mailbox.ID), time.Time{}, "ChatGPT", time.Now()); !ok || code != "555555" || msg.RemoteID != "remote-watcher" {
+		t.Fatalf("stored code = msg:%+v code:%q ok:%v, want watcher code 555555", msg, code, ok)
+	}
+}
+
+func TestMailWatcherPreloadsAPIActiveMailboxesWithoutPriorCodeRequest(t *testing.T) {
+	oldInterval := mailboxMailSyncMinInterval
+	mailboxMailSyncMinInterval = 0
+	t.Cleanup(func() { mailboxMailSyncMinInterval = oldInterval })
+
+	store := newTestStore(t)
+	ownerID := "owner-mail-watcher-auto"
+	accountID := "acc-mail-watcher-auto"
+	if err := store.SaveICloudSessionForOwner(ownerID, testIMAPSession(ownerID, accountID, "watcher-auto@icloud.com")); err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := store.AddMailboxForOwner(ownerID, accountID, "UPI-1", "auto-watcher@icloud.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewServer(Config{
+		MailWatcherEnabled:           true,
+		MailWatcherFetchLimit:        8,
+		MailWatcherInitialFetchLimit: 20,
+		MailWatcherLookbackHours:     24,
+		PublicSyncMinIntervalMS:      1,
+	}, store, discardLogger())
+	server := handler.(*Server)
+	var synced int64
+	server.syncCodeMailboxBatch = func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (map[string][]ICloudSyncedMessage, error) {
+		atomic.AddInt64(&synced, 1)
+		if len(mailboxes) != 1 || mailboxes[0].ID != mailbox.ID {
+			t.Fatalf("mailboxes = %+v, want auto included %s", mailboxes, mailbox.ID)
+		}
+		return map[string][]ICloudSyncedMessage{
+			mailbox.ID: {{
+				RemoteID:   "remote-auto-watcher",
+				UID:        "12",
+				Subject:    "ChatGPT code",
+				Body:       "Use 888888 to continue.",
+				ReceivedAt: time.Now(),
+			}},
+		}, nil
+	}
+
+	server.syncMailWatcherRound(context.Background(), true)
+	if atomic.LoadInt64(&synced) != 1 {
+		t.Fatalf("watcher sync calls = %d, want 1", synced)
+	}
+	if msg, code, ok := latestMailboxCode(store.MessagesForMailbox(mailbox.ID), time.Time{}, "ChatGPT", time.Now()); !ok || code != "888888" || msg.RemoteID != "remote-auto-watcher" {
+		t.Fatalf("stored code = msg:%+v code:%q ok:%v, want auto watcher code 888888", msg, code, ok)
+	}
+}
+
+func TestMailboxCodeQueryReturnsQuicklyWhileBackgroundSyncContinues(t *testing.T) {
+	oldInterval := mailboxMailSyncMinInterval
+	mailboxMailSyncMinInterval = 0
+	t.Cleanup(func() { mailboxMailSyncMinInterval = oldInterval })
+	oldDebounce := mailboxCodePollDebounce
+	mailboxCodePollDebounce = 0
+	t.Cleanup(func() { mailboxCodePollDebounce = oldDebounce })
+
+	store := newTestStore(t)
+	ownerID := "owner-code-fast"
+	if err := store.SaveICloudSessionForOwner(ownerID, testIMAPSession(ownerID, "", "receiver-fast@icloud.com")); err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := store.AddMailboxForOwner(ownerID, "", "UPI-1", "fast@icloud.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(Config{PublicFastSyncWaitMS: 20, PublicSyncMinIntervalMS: 1}, store, discardLogger())
+	server := handler.(*Server)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startedOnce sync.Once
+	server.syncCodeMailboxBatch = func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (map[string][]ICloudSyncedMessage, error) {
+		startedOnce.Do(func() { close(started) })
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return map[string][]ICloudSyncedMessage{
+			mailbox.ID: {{
+				RemoteID:   "remote-fast",
+				UID:        "9",
+				Subject:    "ChatGPT code",
+				Body:       "Use 444444 to continue.",
+				ReceivedAt: time.Now(),
+			}},
+		}, nil
+	}
+
+	start := time.Now()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mailboxes/"+url.PathEscape(mailbox.Email)+"/code?key="+mailbox.APIToken, nil)
+	handler.ServeHTTP(rr, req)
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("code request took %v, want quick no_code response", elapsed)
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code request = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Success bool   `json:"success"`
+		Code    string `json:"code"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Success || body.Code != "no_code" {
+		t.Fatalf("first response = %+v, want no_code while background sync continues", body)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("background sync did not start")
+	}
+	close(release)
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		if msg, code, ok := latestMailboxCode(store.MessagesForMailbox(mailbox.ID), time.Time{}, "ChatGPT", time.Now()); ok && code == "444444" {
+			if msg.RemoteID != "remote-fast" {
+				t.Fatalf("message remote id = %q, want remote-fast", msg.RemoteID)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("background sync did not store code, messages=%+v", store.MessagesForMailbox(mailbox.ID))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestMailboxCodeQueryWaitMSWaitsForSyncResult(t *testing.T) {
+	oldInterval := mailboxMailSyncMinInterval
+	mailboxMailSyncMinInterval = 0
+	t.Cleanup(func() { mailboxMailSyncMinInterval = oldInterval })
+	oldDebounce := mailboxCodePollDebounce
+	mailboxCodePollDebounce = 0
+	t.Cleanup(func() { mailboxCodePollDebounce = oldDebounce })
+
+	store := newTestStore(t)
+	ownerID := "owner-code-wait-ms"
+	if err := store.SaveICloudSessionForOwner(ownerID, testIMAPSession(ownerID, "", "receiver-wait@icloud.com")); err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := store.AddMailboxForOwner(ownerID, "", "UPI-1", "wait@icloud.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(Config{PublicFastSyncWaitMS: 20, PublicSyncMinIntervalMS: 1}, store, discardLogger())
+	server := handler.(*Server)
+	server.syncCodeMailboxBatch = func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (map[string][]ICloudSyncedMessage, error) {
+		time.Sleep(100 * time.Millisecond)
+		return map[string][]ICloudSyncedMessage{
+			mailbox.ID: {{
+				RemoteID:   "remote-wait",
+				UID:        "11",
+				Subject:    "ChatGPT code",
+				Body:       "Use 777777 to continue.",
+				ReceivedAt: time.Now(),
+			}},
+		}, nil
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mailboxes/"+url.PathEscape(mailbox.Email)+"/code?key="+mailbox.APIToken+"&wait_ms=500", nil)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code request = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Success bool   `json:"success"`
+		Code    string `json:"code"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Success || body.Code != "777777" {
+		t.Fatalf("code body = %+v, want waited code 777777", body)
+	}
+}
+
 func TestMailboxCodeQueryDoesNotRepeatServedCachedCode(t *testing.T) {
 	oldInterval := mailboxMailSyncMinInterval
 	mailboxMailSyncMinInterval = 0
@@ -2744,11 +3150,7 @@ func TestMailboxCodeQueryDoesNotRepeatServedCachedCode(t *testing.T) {
 
 	store := newTestStore(t)
 	ownerID := "owner-code-repeat"
-	if err := store.SaveICloudSessionForOwner(ownerID, ICloudSession{
-		OwnerID: ownerID,
-		DSID:    "123",
-		Cookies: []SessionCookie{{Name: "session", Value: "x"}},
-	}); err != nil {
+	if err := store.SaveICloudSessionForOwner(ownerID, testIMAPSession(ownerID, "", "receiver-repeat@icloud.com")); err != nil {
 		t.Fatal(err)
 	}
 	mailbox, err := store.AddMailboxForOwner(ownerID, "", "UPI-1", "alias@icloud.com")
@@ -2760,7 +3162,7 @@ func TestMailboxCodeQueryDoesNotRepeatServedCachedCode(t *testing.T) {
 	}
 	handler := NewServer(Config{}, store, discardLogger())
 	server := handler.(*Server)
-	server.syncMailboxBatch = func(ctx context.Context, session ICloudSession, mailboxes []Mailbox, after time.Time, keyword string, maxThreads int) (map[string][]ICloudSyncedMessage, error) {
+	server.syncCodeMailboxBatch = func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (map[string][]ICloudSyncedMessage, error) {
 		return map[string][]ICloudSyncedMessage{}, nil
 	}
 
@@ -2866,11 +3268,7 @@ func TestSyncMailboxSerializesPerOwner(t *testing.T) {
 
 	store := newTestStore(t)
 	ownerID := "owner-sync"
-	if err := store.SaveICloudSessionForOwner(ownerID, ICloudSession{
-		OwnerID: ownerID,
-		DSID:    "123",
-		Cookies: []SessionCookie{{Name: "session", Value: "x"}},
-	}); err != nil {
+	if err := store.SaveICloudSessionForOwner(ownerID, testIMAPSession(ownerID, "acc", "sync-owner@icloud.com")); err != nil {
 		t.Fatal(err)
 	}
 	first, err := store.AddMailboxForOwner(ownerID, "acc", "first", "first@icloud.com")
@@ -2888,7 +3286,11 @@ func TestSyncMailboxSerializesPerOwner(t *testing.T) {
 	release := make(chan struct{})
 	var active int64
 	var maxActive int64
-	server.syncMailboxMessages = func(ctx context.Context, session ICloudSession, mailbox Mailbox, after time.Time, keyword string, maxThreads int) ([]ICloudSyncedMessage, error) {
+	server.syncCodeMailboxBatch = func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (map[string][]ICloudSyncedMessage, error) {
+		if len(mailboxes) != 1 {
+			t.Fatalf("mailboxes = %d, want 1", len(mailboxes))
+		}
+		mailbox := mailboxes[0]
 		nowActive := atomic.AddInt64(&active, 1)
 		for {
 			old := atomic.LoadInt64(&maxActive)
@@ -2904,7 +3306,7 @@ func TestSyncMailboxSerializesPerOwner(t *testing.T) {
 			return nil, ctx.Err()
 		}
 		atomic.AddInt64(&active, -1)
-		return nil, nil
+		return map[string][]ICloudSyncedMessage{}, nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -2950,11 +3352,7 @@ func TestMailboxCodeRequestsShareOwnerBatchSync(t *testing.T) {
 
 	store := newTestStore(t)
 	ownerID := "owner-code"
-	if err := store.SaveICloudSessionForOwner(ownerID, ICloudSession{
-		OwnerID: ownerID,
-		DSID:    "123",
-		Cookies: []SessionCookie{{Name: "session", Value: "x"}},
-	}); err != nil {
+	if err := store.SaveICloudSessionForOwner(ownerID, testIMAPSession(ownerID, "acc", "batch-owner@icloud.com")); err != nil {
 		t.Fatal(err)
 	}
 	first, err := store.AddMailboxForOwner(ownerID, "acc", "first", "first@icloud.com")
@@ -2969,7 +3367,7 @@ func TestMailboxCodeRequestsShareOwnerBatchSync(t *testing.T) {
 	handler := NewServer(Config{}, store, discardLogger())
 	server := handler.(*Server)
 	var calls int64
-	server.syncMailboxBatch = func(ctx context.Context, session ICloudSession, mailboxes []Mailbox, after time.Time, keyword string, maxThreads int) (map[string][]ICloudSyncedMessage, error) {
+	server.syncCodeMailboxBatch = func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (map[string][]ICloudSyncedMessage, error) {
 		atomic.AddInt64(&calls, 1)
 		now := time.Now()
 		out := make(map[string][]ICloudSyncedMessage, len(mailboxes))
@@ -4276,7 +4674,8 @@ func TestCreateSettingsAreSavedServerSide(t *testing.T) {
 		"create_channel":"apple_account",
 		"scheduler_create_channel":"icloud_web",
 		"scheduler_interval_minutes":30,
-		"scheduler_round_interval_seconds":8
+		"scheduler_round_interval_seconds":8,
+		"mailbox_page_size":25
 	}`, account.ID)))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(cookie)
@@ -4301,6 +4700,7 @@ func TestCreateSettingsAreSavedServerSide(t *testing.T) {
 			SchedulerCreateChannel        string   `json:"scheduler_create_channel"`
 			SchedulerIntervalMinutes      int      `json:"scheduler_interval_minutes"`
 			SchedulerRoundIntervalSeconds int      `json:"scheduler_round_interval_seconds"`
+			MailboxPageSize               int      `json:"mailbox_page_size"`
 		} `json:"settings"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
@@ -4312,7 +4712,8 @@ func TestCreateSettingsAreSavedServerSide(t *testing.T) {
 		body.Settings.CreateChannel != string(mailboxCreateChannelAppleAccount) ||
 		body.Settings.SchedulerCreateChannel != string(mailboxCreateChannelICloudWeb) ||
 		body.Settings.SchedulerIntervalMinutes != 30 ||
-		body.Settings.SchedulerRoundIntervalSeconds != 8 {
+		body.Settings.SchedulerRoundIntervalSeconds != 8 ||
+		body.Settings.MailboxPageSize != 25 {
 		t.Fatalf("settings = %+v, want saved server config", body.Settings)
 	}
 }
@@ -4382,8 +4783,8 @@ func TestSyncMailboxUsesMailboxAccountSession(t *testing.T) {
 	store := newTestStore(t)
 	ownerID := "owner-account-sync"
 	for _, session := range []ICloudSession{
-		{OwnerID: ownerID, AppleID: "first@example.com", DSID: "dsid-first", IsICloudPlus: true, CanCreateHME: true, Cookies: []SessionCookie{{Name: "a", Value: "1"}}},
-		{OwnerID: ownerID, AppleID: "second@example.com", DSID: "dsid-second", IsICloudPlus: true, CanCreateHME: true, Cookies: []SessionCookie{{Name: "b", Value: "2"}}},
+		testIMAPSession(ownerID, "", "first@example.com"),
+		testIMAPSession(ownerID, "", "second@example.com"),
 	} {
 		if err := store.SaveICloudSessionForOwner(ownerID, session); err != nil {
 			t.Fatal(err)
@@ -4400,17 +4801,22 @@ func TestSyncMailboxUsesMailboxAccountSession(t *testing.T) {
 	}
 	handler := NewServer(Config{}, store, discardLogger())
 	server := handler.(*Server)
-	server.syncMailboxMessages = func(ctx context.Context, session ICloudSession, mailbox Mailbox, after time.Time, keyword string, maxThreads int) ([]ICloudSyncedMessage, error) {
-		if session.AccountID != targetAccountID {
-			t.Fatalf("sync used account %q, want %q", session.AccountID, targetAccountID)
+	server.syncCodeMailboxBatch = func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (map[string][]ICloudSyncedMessage, error) {
+		if state.IMAPEmail != "second@example.com" {
+			t.Fatalf("sync used IMAP email %q, want second@example.com", state.IMAPEmail)
 		}
-		return []ICloudSyncedMessage{{
-			RemoteID:   "m1",
-			UID:        "1",
-			Subject:    "ChatGPT code",
-			Body:       "Use 123456 to continue.",
-			ReceivedAt: time.Now(),
-		}}, nil
+		if len(mailboxes) != 1 || mailboxes[0].AccountID != targetAccountID {
+			t.Fatalf("sync mailboxes = %+v, want account %q", mailboxes, targetAccountID)
+		}
+		return map[string][]ICloudSyncedMessage{
+			mailbox.ID: {{
+				RemoteID:   "m1",
+				UID:        "1",
+				Subject:    "ChatGPT code",
+				Body:       "Use 123456 to continue.",
+				ReceivedAt: time.Now(),
+			}},
+		}, nil
 	}
 	count, err := server.syncMailbox(context.Background(), mailbox, time.Time{}, "ChatGPT")
 	if err != nil {

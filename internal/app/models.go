@@ -36,6 +36,7 @@ type State struct {
 const (
 	LoginStateICloudWeb    = "icloud_web"
 	LoginStateAppleAccount = "apple_account"
+	LoginStateICloudIMAP   = "icloud_imap"
 )
 
 type User struct {
@@ -138,6 +139,11 @@ type LoginState struct {
 	DataAccessToken   string          `json:"data_access_token,omitempty"`
 	UserAgent         string          `json:"user_agent,omitempty"`
 	Note              string          `json:"note,omitempty"`
+	IMAPEmail         string          `json:"imap_email,omitempty"`
+	IMAPUsername      string          `json:"imap_username,omitempty"`
+	IMAPHost          string          `json:"imap_host,omitempty"`
+	IMAPPort          int             `json:"imap_port,omitempty"`
+	IMAPAppPassword   string          `json:"imap_app_password,omitempty"`
 	ManageExpiresAt   time.Time       `json:"manage_expires_at,omitempty"`
 	LastCheckedAt     time.Time       `json:"last_checked_at,omitempty"`
 	LastCheckOK       bool            `json:"last_check_ok,omitempty"`
@@ -153,6 +159,7 @@ type CreateSettings struct {
 	SchedulerCreateChannel        string    `json:"scheduler_create_channel,omitempty"`
 	SchedulerIntervalMinutes      int       `json:"scheduler_interval_minutes,omitempty"`
 	SchedulerRoundIntervalSeconds int       `json:"scheduler_round_interval_seconds,omitempty"`
+	MailboxPageSize               int       `json:"mailbox_page_size,omitempty"`
 	UpdatedAt                     time.Time `json:"updated_at,omitempty"`
 }
 
@@ -297,6 +304,21 @@ type publicMailbox struct {
 	UpdatedAt          string `json:"updated_at"`
 }
 
+type publicMailboxGroup struct {
+	Key       string `json:"key"`
+	Title     string `json:"title"`
+	Count     int    `json:"count"`
+	AccountID string `json:"account_id,omitempty"`
+}
+
+type publicPagination struct {
+	Page       int `json:"page"`
+	PageSize   int `json:"page_size"`
+	Total      int `json:"total"`
+	TotalAll   int `json:"total_all"`
+	TotalPages int `json:"total_pages"`
+}
+
 type publicMessage struct {
 	ID         string `json:"id"`
 	OwnerID    string `json:"owner_id,omitempty"`
@@ -359,6 +381,12 @@ type publicICloudSession struct {
 	AppleAccountNextRefreshAt   string `json:"apple_account_next_refresh_at,omitempty"`
 	AppleAccountManageExpiresAt string `json:"apple_account_manage_expires_at,omitempty"`
 	AppleAccountManageReady     bool   `json:"apple_account_manage_ready"`
+	ICloudIMAPLoginSaved        bool   `json:"icloud_imap_login_saved"`
+	ICloudIMAPLoginChecked      bool   `json:"icloud_imap_login_checked"`
+	ICloudIMAPLoginOK           bool   `json:"icloud_imap_login_ok"`
+	ICloudIMAPLoginStatus       string `json:"icloud_imap_login_status,omitempty"`
+	ICloudIMAPEmail             string `json:"icloud_imap_email,omitempty"`
+	ICloudIMAPHost              string `json:"icloud_imap_host,omitempty"`
 	ProviderConfigured          bool   `json:"provider_configured"`
 	NeedsManualLogin            bool   `json:"needs_manual_login"`
 	LastCheckedAt               string `json:"last_checked_at,omitempty"`

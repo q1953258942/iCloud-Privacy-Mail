@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,32 +26,58 @@ var webFS embed.FS
 const mailboxCodeFreshWindow = 5 * time.Minute
 const mailboxCreateMinInterval = 3 * time.Second
 const mailboxCreateLimitCooldown = 2 * time.Minute
+const mailboxListDefaultPageSize = 10
+const mailboxListMaxPageSize = 500
 
 var mailboxMailSyncMinInterval = 3 * time.Second
-var mailboxCodePollDebounce = 500 * time.Millisecond
+var mailboxCodeFastWait = 600 * time.Millisecond
+var mailboxCodePollDebounce = 100 * time.Millisecond
 var mailboxCodeBatchSyncTimeout = 120 * time.Second
+var mailboxCodeMaxClientWait = 30 * time.Second
+var mailWatcherPollInterval = 3 * time.Second
+var mailWatcherActiveTTL = 20 * time.Minute
+
+const (
+	defaultMailWatcherFetchLimit        = 8
+	defaultMailWatcherInitialFetchLimit = 20
+	defaultMailWatcherLookback          = 24 * time.Hour
+	mailWatcherSyncTimeout              = 25 * time.Second
+)
 
 type Server struct {
-	cfg                   Config
-	store                 *FileStore
-	logger                *slog.Logger
-	mux                   *http.ServeMux
-	icloudProtocolLogins  *appleAuthPendingStore
-	appleAccountLogins    *appleAuthPendingStore
-	icloudCreateMu        sync.Mutex
-	icloudCreateGates     map[string]chan struct{}
-	icloudCreateLast      map[string]time.Time
-	icloudCreateCooldown  map[string]time.Time
-	icloudMailSyncMu      sync.Mutex
-	icloudMailSyncGates   map[string]chan struct{}
-	icloudMailSyncLast    map[string]time.Time
-	mailboxCodeMu         sync.Mutex
-	mailboxCodePollers    map[string]*mailboxCodePoller
-	schedulerMu           sync.Mutex
-	mailboxSchedulers     map[string]*mailboxSchedulerJob
-	createMailboxForOwner func(ctx context.Context, ownerID, accountID, label, note string) (Mailbox, ICloudRemoteMailbox, error)
-	syncMailboxMessages   func(ctx context.Context, session ICloudSession, mailbox Mailbox, after time.Time, keyword string, maxThreads int) ([]ICloudSyncedMessage, error)
-	syncMailboxBatch      func(ctx context.Context, session ICloudSession, mailboxes []Mailbox, after time.Time, keyword string, maxThreads int) (map[string][]ICloudSyncedMessage, error)
+	cfg                          Config
+	store                        *FileStore
+	logger                       *slog.Logger
+	mux                          *http.ServeMux
+	icloudProtocolLogins         *appleAuthPendingStore
+	appleAccountLogins           *appleAuthPendingStore
+	icloudCreateMu               sync.Mutex
+	icloudCreateGates            map[string]chan struct{}
+	icloudCreateLast             map[string]time.Time
+	icloudCreateCooldown         map[string]time.Time
+	icloudMailSyncMu             sync.Mutex
+	icloudMailSyncGates          map[string]chan struct{}
+	icloudMailSyncLast           map[string]time.Time
+	mailboxSyncMinInterval       time.Duration
+	mailboxCodeFastWait          time.Duration
+	mailboxCodeMu                sync.Mutex
+	mailboxCodePollers           map[string]*mailboxCodePoller
+	mailWatcherMu                sync.Mutex
+	mailWatcherCancel            context.CancelFunc
+	mailWatcherWake              chan struct{}
+	mailWatcherEnabled           bool
+	mailWatcherInterval          time.Duration
+	mailWatcherFetchLimit        int
+	mailWatcherInitialFetchLimit int
+	mailWatcherLookback          time.Duration
+	mailWatcherActiveUntil       map[string]time.Time
+	schedulerMu                  sync.Mutex
+	mailboxSchedulers            map[string]*mailboxSchedulerJob
+	createMailboxForOwner        func(ctx context.Context, ownerID, accountID, label, note string) (Mailbox, ICloudRemoteMailbox, error)
+	syncMailboxMessages          func(ctx context.Context, session ICloudSession, mailbox Mailbox, after time.Time, keyword string, maxThreads int) ([]ICloudSyncedMessage, error)
+	syncMailboxBatch             func(ctx context.Context, session ICloudSession, mailboxes []Mailbox, after time.Time, keyword string, maxThreads int) (map[string][]ICloudSyncedMessage, error)
+	syncCodeMailboxBatch         func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (map[string][]ICloudSyncedMessage, error)
+	checkIMAPLogin               func(ctx context.Context, email, appPassword string) error
 }
 
 type createMailboxFailure struct {
@@ -141,21 +168,53 @@ type mailboxCodePoller struct {
 	waiters []*mailboxCodeWaiter
 }
 
+type mailboxWatcherOwnerGroup struct {
+	ownerID   string
+	mailboxes []Mailbox
+}
+
 func NewServer(cfg Config, store *FileStore, logger *slog.Logger) http.Handler {
 	s := &Server{
-		cfg:                  cfg,
-		store:                store,
-		logger:               logger,
-		mux:                  http.NewServeMux(),
-		icloudProtocolLogins: newAppleAuthPendingStore(),
-		appleAccountLogins:   newAppleAuthPendingStore(),
-		icloudCreateGates:    make(map[string]chan struct{}),
-		icloudCreateLast:     make(map[string]time.Time),
-		icloudCreateCooldown: make(map[string]time.Time),
-		icloudMailSyncGates:  make(map[string]chan struct{}),
-		icloudMailSyncLast:   make(map[string]time.Time),
-		mailboxCodePollers:   make(map[string]*mailboxCodePoller),
-		mailboxSchedulers:    make(map[string]*mailboxSchedulerJob),
+		cfg:                          cfg,
+		store:                        store,
+		logger:                       logger,
+		mux:                          http.NewServeMux(),
+		icloudProtocolLogins:         newAppleAuthPendingStore(),
+		appleAccountLogins:           newAppleAuthPendingStore(),
+		icloudCreateGates:            make(map[string]chan struct{}),
+		icloudCreateLast:             make(map[string]time.Time),
+		icloudCreateCooldown:         make(map[string]time.Time),
+		icloudMailSyncGates:          make(map[string]chan struct{}),
+		icloudMailSyncLast:           make(map[string]time.Time),
+		mailboxSyncMinInterval:       mailboxMailSyncMinInterval,
+		mailboxCodeFastWait:          mailboxCodeFastWait,
+		mailboxCodePollers:           make(map[string]*mailboxCodePoller),
+		mailWatcherWake:              make(chan struct{}, 1),
+		mailWatcherEnabled:           cfg.MailWatcherEnabled,
+		mailWatcherInterval:          mailWatcherPollInterval,
+		mailWatcherFetchLimit:        defaultMailWatcherFetchLimit,
+		mailWatcherInitialFetchLimit: defaultMailWatcherInitialFetchLimit,
+		mailWatcherLookback:          defaultMailWatcherLookback,
+		mailWatcherActiveUntil:       make(map[string]time.Time),
+		mailboxSchedulers:            make(map[string]*mailboxSchedulerJob),
+	}
+	if cfg.PublicSyncMinIntervalMS > 0 {
+		s.mailboxSyncMinInterval = time.Duration(cfg.PublicSyncMinIntervalMS) * time.Millisecond
+	}
+	if cfg.PublicFastSyncWaitMS > 0 {
+		s.mailboxCodeFastWait = time.Duration(cfg.PublicFastSyncWaitMS) * time.Millisecond
+	}
+	if cfg.MailWatcherPollMS > 0 {
+		s.mailWatcherInterval = time.Duration(cfg.MailWatcherPollMS) * time.Millisecond
+	}
+	if cfg.MailWatcherFetchLimit > 0 {
+		s.mailWatcherFetchLimit = cfg.MailWatcherFetchLimit
+	}
+	if cfg.MailWatcherInitialFetchLimit > 0 {
+		s.mailWatcherInitialFetchLimit = cfg.MailWatcherInitialFetchLimit
+	}
+	if cfg.MailWatcherLookbackHours > 0 {
+		s.mailWatcherLookback = time.Duration(cfg.MailWatcherLookbackHours) * time.Hour
 	}
 	s.createMailboxForOwner = s.createICloudMailboxForOwner
 	s.syncMailboxMessages = func(ctx context.Context, session ICloudSession, mailbox Mailbox, after time.Time, keyword string, maxThreads int) ([]ICloudSyncedMessage, error) {
@@ -164,6 +223,7 @@ func NewServer(cfg Config, store *FileStore, logger *slog.Logger) http.Handler {
 	s.syncMailboxBatch = func(ctx context.Context, session ICloudSession, mailboxes []Mailbox, after time.Time, keyword string, maxThreads int) (map[string][]ICloudSyncedMessage, error) {
 		return NewICloudClient().SyncMailboxMessagesBatch(ctx, session, mailboxes, after, keyword, maxThreads)
 	}
+	s.checkIMAPLogin = CheckICloudIMAPLogin
 	s.routes()
 	return s
 }
@@ -176,6 +236,35 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mux.ServeHTTP(w, r)
+}
+
+func (s *Server) StartMailWatcher(ctx context.Context) {
+	if !s.mailWatcherEnabled {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.mailWatcherMu.Lock()
+	if s.mailWatcherCancel != nil {
+		s.mailWatcherMu.Unlock()
+		return
+	}
+	watchCtx, cancel := context.WithCancel(ctx)
+	s.mailWatcherCancel = cancel
+	s.mailWatcherMu.Unlock()
+
+	go s.runMailWatcher(watchCtx)
+}
+
+func (s *Server) StopMailWatcher() {
+	s.mailWatcherMu.Lock()
+	cancel := s.mailWatcherCancel
+	s.mailWatcherCancel = nil
+	s.mailWatcherMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 func (s *Server) routes() {
@@ -203,6 +292,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/apple-account/login/start", s.handleStartAppleAccountLogin)
 	s.mux.HandleFunc("POST /api/apple-account/login/2fa", s.handleSubmitAppleAccount2FA)
 	s.mux.HandleFunc("POST /api/icloud/session/check", s.handleCheckICloudSession)
+	s.mux.HandleFunc("POST /api/icloud/imap-login/save", s.handleSaveICloudIMAPLogin)
+	s.mux.HandleFunc("POST /api/icloud/imap-login/check", s.handleCheckICloudIMAPLogin)
 	s.mux.HandleFunc("POST /api/icloud/mailboxes/create", s.handleCreateICloudMailbox)
 	s.mux.HandleFunc("POST /api/icloud/mailboxes/sync", s.handleSyncICloudMailboxes)
 	s.mux.HandleFunc("GET /api/icloud/scheduler/status", s.handleMailboxSchedulerStatus)
@@ -264,6 +355,7 @@ func (s *Server) handleSaveCreateSettings(w http.ResponseWriter, r *http.Request
 		SchedulerCreateChannel        string   `json:"scheduler_create_channel"`
 		SchedulerIntervalMinutes      int      `json:"scheduler_interval_minutes"`
 		SchedulerRoundIntervalSeconds int      `json:"scheduler_round_interval_seconds"`
+		MailboxPageSize               int      `json:"mailbox_page_size"`
 	}
 	if err := decodeJSON(r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -284,6 +376,7 @@ func (s *Server) handleSaveCreateSettings(w http.ResponseWriter, r *http.Request
 		SchedulerCreateChannel:        payload.SchedulerCreateChannel,
 		SchedulerIntervalMinutes:      payload.SchedulerIntervalMinutes,
 		SchedulerRoundIntervalSeconds: payload.SchedulerRoundIntervalSeconds,
+		MailboxPageSize:               payload.MailboxPageSize,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -827,7 +920,7 @@ func (s *Server) handleCheckICloudSession(w http.ResponseWriter, r *http.Request
 	failed := 0
 	var lastErr error
 	for _, session := range sessions {
-		checkedSession, ok, err := checkSavedLoginStates(r.Context(), client, session, checkedAt)
+		checkedSession, ok, err := checkSavedLoginStatesWithIMAP(r.Context(), client, session, checkedAt, s.checkSavedIMAPLogin)
 		if !ok {
 			failed++
 			lastErr = err
@@ -869,7 +962,198 @@ func (s *Server) handleCheckICloudSession(w http.ResponseWriter, r *http.Request
 	})
 }
 
+func (s *Server) handleSaveICloudIMAPLogin(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		AccountID   string `json:"account_id"`
+		Email       string `json:"email"`
+		AppPassword string `json:"app_password"`
+	}
+	if err := decodeJSON(r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	ownerID := requestOwnerID(r, s.store)
+	accountID := strings.TrimSpace(payload.AccountID)
+	email := normalizeICloudIMAPEmail(payload.Email)
+	appPassword := strings.TrimSpace(payload.AppPassword)
+	if email == "" {
+		writeError(w, http.StatusBadRequest, errCode("imap_email_missing", "请输入 iCloud 邮箱账号", false))
+		return
+	}
+	if appPassword == "" {
+		writeError(w, http.StatusBadRequest, errCode("imap_app_password_missing", "请输入 App 专用密码", false))
+		return
+	}
+	if accountID != "" && !s.canAccessAccountID(r, accountID) {
+		writeError(w, http.StatusForbidden, errCode("account_forbidden", "无权操作该 Apple 账号", false))
+		return
+	}
+
+	if err := s.checkSavedIMAPLogin(r.Context(), email, appPassword); err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+
+	now := time.Now()
+	session, err := s.sessionForIMAPSave(ownerID, accountID, email)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if session.SavedAt.IsZero() {
+		session.SavedAt = now
+	}
+	session.OwnerID = ownerID
+	session.AppleID = firstNonEmpty(strings.TrimSpace(session.AppleID), email)
+	session = withICloudIMAPLoginState(session, LoginState{
+		Kind:              LoginStateICloudIMAP,
+		Host:              defaultICloudIMAPHost,
+		Origin:            "imaps://" + defaultICloudIMAPHost,
+		SavedAt:           now,
+		IMAPEmail:         email,
+		IMAPUsername:      email,
+		IMAPHost:          defaultICloudIMAPHost,
+		IMAPPort:          defaultICloudIMAPPort,
+		IMAPAppPassword:   appPassword,
+		LastCheckedAt:     now,
+		LastCheckOK:       true,
+		LastStatusMessage: "取码登录正常",
+	})
+	session.LastCheckedAt = now
+	session.LastCheckOK = true
+	session.LastStatusMessage = "取码登录正常"
+	if err := s.store.SaveICloudSessionForOwner(ownerID, session); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	sessions := s.publicSessionsForOwner(ownerID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":  true,
+		"message":  "取码登录已保存并检测正常",
+		"session":  publicSessionForAppleID(sessions, email),
+		"sessions": sessions,
+	})
+}
+
+func (s *Server) handleCheckICloudIMAPLogin(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		AccountID string `json:"account_id"`
+	}
+	if r.ContentLength != 0 {
+		if err := decodeJSON(r, &payload); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+	} else {
+		_ = r.Body.Close()
+	}
+	ownerID := requestOwnerID(r, s.store)
+	sessions := s.sessionsForOwner(ownerID, payload.AccountID)
+	if len(sessions) == 0 {
+		writeError(w, http.StatusBadRequest, errCode("imap_session_missing", "未保存取码登录，请先保存 iCloud 邮箱账号和 App 专用密码", true))
+		return
+	}
+
+	checkedAt := time.Now()
+	checks := 0
+	failed := 0
+	var lastErr error
+	for _, session := range sessions {
+		state, ok := iCloudIMAPLoginState(session)
+		if !ok {
+			continue
+		}
+		checks++
+		if err := s.checkSavedIMAPLogin(r.Context(), state.IMAPEmail, state.IMAPAppPassword); err != nil {
+			failed++
+			lastErr = err
+			state.LastCheckedAt = checkedAt
+			state.LastCheckOK = false
+			state.LastStatusMessage = "取码登录异常：" + err.Error()
+		} else {
+			state.LastCheckedAt = checkedAt
+			state.LastCheckOK = true
+			state.LastStatusMessage = "取码登录正常"
+		}
+		session = withICloudIMAPLoginState(session, state)
+		if err := s.store.SaveICloudSessionForOwner(ownerID, session); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	if checks == 0 {
+		writeError(w, http.StatusBadRequest, errCode("imap_session_missing", "未保存取码登录，请先保存 iCloud 邮箱账号和 App 专用密码", true))
+		return
+	}
+	publicSessions := s.publicSessionsForOwner(ownerID)
+	if failed == checks {
+		message := "取码登录检测失败"
+		if lastErr != nil {
+			message += "：" + lastErr.Error()
+		}
+		writeError(w, http.StatusBadGateway, errCode("imap_session_check_failed", message, true))
+		return
+	}
+	message := "取码登录检测正常"
+	if failed > 0 {
+		message = fmt.Sprintf("取码登录部分检测成功：成功 %d，失败 %d", checks-failed, failed)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":       true,
+		"message":       message,
+		"checked_at":    formatTime(checkedAt),
+		"sessions":      publicSessions,
+		"checked_count": checks,
+		"failed_count":  failed,
+	})
+}
+
+func (s *Server) checkSavedIMAPLogin(ctx context.Context, email, appPassword string) error {
+	if s.checkIMAPLogin != nil {
+		return s.checkIMAPLogin(ctx, email, appPassword)
+	}
+	return CheckICloudIMAPLogin(ctx, email, appPassword)
+}
+
+func (s *Server) sessionForIMAPSave(ownerID, accountID, email string) (ICloudSession, error) {
+	accountID = strings.TrimSpace(accountID)
+	email = normalizeICloudIMAPEmail(email)
+	if accountID != "" {
+		if account, ok := s.store.FindAccountByID(accountID); ok {
+			accountEmail := normalizeICloudIMAPEmail(account.AppleID)
+			if accountEmail != "" && email != "" && !strings.EqualFold(accountEmail, email) {
+				return ICloudSession{}, errCode("imap_account_mismatch", "App 专用密码邮箱和所选 Apple 账号不一致", false)
+			}
+		}
+		if session, ok := s.sessionForOwnerAccount(ownerID, accountID); ok {
+			return session, nil
+		}
+		return ICloudSession{OwnerID: ownerID, AccountID: accountID, AppleID: email}, nil
+	}
+	if session, ok := s.sessionForOwnerIMAPEmail(ownerID, email); ok {
+		return session, nil
+	}
+	return ICloudSession{OwnerID: ownerID, AppleID: email}, nil
+}
+
+func (s *Server) sessionForOwnerIMAPEmail(ownerID, email string) (ICloudSession, bool) {
+	email = normalizeICloudIMAPEmail(email)
+	for _, session := range s.sessionsForOwner(ownerID, "") {
+		if email != "" && strings.EqualFold(normalizeICloudIMAPEmail(session.AppleID), email) {
+			return session, true
+		}
+		if state, ok := iCloudIMAPLoginState(session); ok && strings.EqualFold(normalizeICloudIMAPEmail(state.IMAPEmail), email) {
+			return session, true
+		}
+	}
+	return ICloudSession{}, false
+}
+
 func checkSavedLoginStates(ctx context.Context, client *ICloudClient, session ICloudSession, checkedAt time.Time) (ICloudSession, bool, error) {
+	return checkSavedLoginStatesWithIMAP(ctx, client, session, checkedAt, CheckICloudIMAPLogin)
+}
+
+func checkSavedLoginStatesWithIMAP(ctx context.Context, client *ICloudClient, session ICloudSession, checkedAt time.Time, imapChecker func(context.Context, string, string) error) (ICloudSession, bool, error) {
 	var parts []string
 	checks := 0
 	successes := 0
@@ -918,8 +1202,31 @@ func checkSavedLoginStates(ctx context.Context, client *ICloudClient, session IC
 		}
 	}
 
+	if iCloudIMAPLoginSaved(session) {
+		checks++
+		state, _ := iCloudIMAPLoginState(session)
+		if imapChecker == nil {
+			imapChecker = CheckICloudIMAPLogin
+		}
+		if err := imapChecker(ctx, state.IMAPEmail, state.IMAPAppPassword); err != nil {
+			lastErr = err
+			state.LastCheckedAt = checkedAt
+			state.LastCheckOK = false
+			state.LastStatusMessage = "取码登录异常：" + err.Error()
+			session = withICloudIMAPLoginState(session, state)
+			parts = append(parts, "取码登录异常")
+		} else {
+			state.LastCheckedAt = checkedAt
+			state.LastCheckOK = true
+			state.LastStatusMessage = "取码登录正常"
+			session = withICloudIMAPLoginState(session, state)
+			successes++
+			parts = append(parts, "取码登录正常")
+		}
+	}
+
 	if checks == 0 {
-		lastErr = errCode("icloud_session_missing", "未保存新接口或旧接口登录态，请先保存登录态", true)
+		lastErr = errCode("icloud_session_missing", "未保存新接口、旧接口或取码登录态，请先保存登录态", true)
 		parts = append(parts, lastErr.Error())
 	}
 
@@ -1294,11 +1601,193 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListMailboxes(w http.ResponseWriter, r *http.Request) {
 	state := s.scopedState(r)
-	out := make([]publicMailbox, 0, len(state.Mailboxes))
-	for _, mailbox := range state.Mailboxes {
+	accountsByID := mailboxAccountMap(state.Accounts)
+	base := filterMailboxesByOwner(state.Mailboxes, strings.TrimSpace(r.URL.Query().Get("owner_id")), scopedOwnerID(r, s.store), s.isAdminRequest(r))
+	groups := publicMailboxGroups(base, accountsByID)
+	filtered := filterMailboxesForList(base, accountsByID, r.URL.Query())
+	sortMailboxesForList(filtered, accountsByID)
+
+	page, pageSize, paged := mailboxListPagination(r)
+	pageRows := filtered
+	if paged {
+		pageRows = paginateMailboxes(filtered, page, pageSize)
+	}
+	out := make([]publicMailbox, 0, len(pageRows))
+	for _, mailbox := range pageRows {
 		out = append(out, s.publicMailbox(r, mailbox))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "mailboxes": out})
+	response := map[string]any{
+		"success":   true,
+		"mailboxes": out,
+		"groups":    groups,
+		"pagination": publicPagination{
+			Page:       page,
+			PageSize:   pageSize,
+			Total:      len(filtered),
+			TotalAll:   len(base),
+			TotalPages: totalPages(len(filtered), pageSize),
+		},
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func filterMailboxesByOwner(mailboxes []Mailbox, ownerFilter, scopedOwner string, admin bool) []Mailbox {
+	ownerFilter = strings.TrimSpace(ownerFilter)
+	if ownerFilter == "" || ownerFilter == "all" {
+		return append([]Mailbox(nil), mailboxes...)
+	}
+	if !admin {
+		scopedOwner = strings.TrimSpace(scopedOwner)
+		if scopedOwner == "" || !constantTimeEqual(scopedOwner, ownerFilter) {
+			return nil
+		}
+	}
+	out := make([]Mailbox, 0, len(mailboxes))
+	for _, mailbox := range mailboxes {
+		if constantTimeEqual(strings.TrimSpace(mailbox.OwnerID), ownerFilter) {
+			out = append(out, mailbox)
+		}
+	}
+	return out
+}
+
+func filterMailboxesForList(mailboxes []Mailbox, accountsByID map[string]Account, values url.Values) []Mailbox {
+	accountKey := strings.TrimSpace(firstNonEmpty(values.Get("account_key"), values.Get("account_id")))
+	keyword := strings.ToLower(strings.TrimSpace(firstNonEmpty(values.Get("search"), values.Get("q"))))
+	out := make([]Mailbox, 0, len(mailboxes))
+	for _, mailbox := range mailboxes {
+		if keyword == "" && accountKey != "" && accountKey != "all" && !constantTimeEqual(mailboxListAccountKey(mailbox, accountsByID), accountKey) {
+			continue
+		}
+		if keyword != "" && !mailboxListMatchesSearch(mailbox, accountsByID, keyword) {
+			continue
+		}
+		out = append(out, mailbox)
+	}
+	return out
+}
+
+func mailboxListMatchesSearch(mailbox Mailbox, accountsByID map[string]Account, keyword string) bool {
+	account := accountsByID[strings.TrimSpace(mailbox.AccountID)]
+	haystack := strings.ToLower(strings.Join([]string{
+		mailbox.Email,
+		mailbox.Label,
+		mailbox.ID,
+		mailbox.AccountID,
+		account.Label,
+		account.AppleID,
+		mailbox.Status,
+		mailbox.OwnerID,
+	}, " "))
+	return strings.Contains(haystack, keyword)
+}
+
+func sortMailboxesForList(mailboxes []Mailbox, accountsByID map[string]Account) {
+	sort.Slice(mailboxes, func(i, j int) bool {
+		leftTitle := strings.ToLower(mailboxListAccountTitle(mailboxes[i], accountsByID))
+		rightTitle := strings.ToLower(mailboxListAccountTitle(mailboxes[j], accountsByID))
+		if leftTitle != rightTitle {
+			return leftTitle < rightTitle
+		}
+		return strings.ToLower(mailboxes[i].Email) < strings.ToLower(mailboxes[j].Email)
+	})
+}
+
+func paginateMailboxes(mailboxes []Mailbox, page, pageSize int) []Mailbox {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = mailboxListDefaultPageSize
+	}
+	start := (page - 1) * pageSize
+	if start >= len(mailboxes) {
+		return nil
+	}
+	end := start + pageSize
+	if end > len(mailboxes) {
+		end = len(mailboxes)
+	}
+	return mailboxes[start:end]
+}
+
+func mailboxListPagination(r *http.Request) (int, int, bool) {
+	values := r.URL.Query()
+	paged := values.Has("page") || values.Has("page_size") || values.Has("search") || values.Has("q") || values.Has("account_key") || values.Has("account_id") || values.Has("owner_id")
+	page := parseBoundedPositiveInt(values.Get("page"), 1, 1, 1_000_000)
+	pageSize := parseBoundedPositiveInt(values.Get("page_size"), mailboxListDefaultPageSize, 1, mailboxListMaxPageSize)
+	return page, pageSize, paged
+}
+
+func parseBoundedPositiveInt(value string, fallback, minValue, maxValue int) int {
+	n, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return fallback
+	}
+	if n < minValue {
+		return minValue
+	}
+	if n > maxValue {
+		return maxValue
+	}
+	return n
+}
+
+func totalPages(total, pageSize int) int {
+	if pageSize < 1 {
+		pageSize = mailboxListDefaultPageSize
+	}
+	if total <= 0 {
+		return 1
+	}
+	return (total + pageSize - 1) / pageSize
+}
+
+func mailboxAccountMap(accounts []Account) map[string]Account {
+	out := make(map[string]Account, len(accounts))
+	for _, account := range accounts {
+		if strings.TrimSpace(account.ID) != "" {
+			out[account.ID] = account
+		}
+	}
+	return out
+}
+
+func publicMailboxGroups(mailboxes []Mailbox, accountsByID map[string]Account) []publicMailboxGroup {
+	byKey := map[string]publicMailboxGroup{}
+	for _, mailbox := range mailboxes {
+		key := mailboxListAccountKey(mailbox, accountsByID)
+		group := byKey[key]
+		if group.Key == "" {
+			group = publicMailboxGroup{
+				Key:       key,
+				Title:     mailboxListAccountTitle(mailbox, accountsByID),
+				AccountID: strings.TrimSpace(mailbox.AccountID),
+			}
+		}
+		group.Count++
+		byKey[key] = group
+	}
+	groups := make([]publicMailboxGroup, 0, len(byKey))
+	for _, group := range byKey {
+		groups = append(groups, group)
+	}
+	sort.Slice(groups, func(i, j int) bool {
+		return strings.ToLower(groups[i].Title) < strings.ToLower(groups[j].Title)
+	})
+	return groups
+}
+
+func mailboxListAccountKey(mailbox Mailbox, accountsByID map[string]Account) string {
+	if strings.TrimSpace(mailbox.AccountID) != "" {
+		return strings.TrimSpace(mailbox.AccountID)
+	}
+	return "unbound"
+}
+
+func mailboxListAccountTitle(mailbox Mailbox, accountsByID map[string]Account) string {
+	account := accountsByID[strings.TrimSpace(mailbox.AccountID)]
+	return firstNonEmpty(account.Label, account.AppleID, mailbox.AccountID, "未绑定 Apple 账号")
 }
 
 func (s *Server) handleCreateMailbox(w http.ResponseWriter, r *http.Request) {
@@ -1630,9 +2119,10 @@ func (s *Server) writeMailboxCode(w http.ResponseWriter, r *http.Request, mailbo
 		return
 	}
 	if !mailbox.ICloudActive {
-		writeError(w, http.StatusForbidden, errCode("icloud_inactive", "iCloud 登录态失效", false))
+		writeError(w, http.StatusForbidden, errCode("icloud_inactive", "邮箱已停用或 iCloud 状态不可用", false))
 		return
 	}
+	s.markMailWatcherActive(mailbox.ID)
 	after, err := parseAfter(r.URL.Query().Get("after"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -1646,20 +2136,21 @@ func (s *Server) writeMailboxCode(w http.ResponseWriter, r *http.Request, mailbo
 	codeAfter := mailboxCodeAfter(after, now)
 	allowStale := truthy(r.URL.Query().Get("allow_stale"))
 	cacheOnly := truthy(r.URL.Query().Get("cache"))
+	messages := s.store.MessagesForMailbox(mailbox.ID)
 	if cacheOnly {
-		if msg, code, ok := latestMailboxCode(s.store.MessagesForMailbox(mailbox.ID), codeAfter, keyword, now); ok {
+		if msg, code, ok := latestMailboxCode(messages, codeAfter, keyword, now); ok {
 			s.writeMailboxCodeSuccess(w, mailbox, msg, code, "", false)
 			return
 		}
 		writeError(w, http.StatusOK, errCode("no_code", "暂未收到验证码", true))
 		return
 	}
-	if msg, code, ok := latestMailboxCodeSkipping(s.store.MessagesForMailbox(mailbox.ID), after, keyword, now, mailbox.LastCodeMessageID); ok && !after.IsZero() {
+	if msg, code, ok := latestMailboxCodeSkipping(messages, codeAfter, keyword, now, mailbox.LastCodeMessageID); ok {
 		s.writeMailboxCodeSuccess(w, mailbox, msg, code, "", true)
 		return
 	}
 
-	result := s.waitMailboxCode(r.Context(), mailbox, codeAfter, keyword, true, mailbox.LastCodeMessageID)
+	result := s.waitMailboxCode(r.Context(), mailbox, codeAfter, keyword, true, mailbox.LastCodeMessageID, s.mailboxCodeWaitDuration(r))
 	if result.syncErr != nil {
 		s.logger.Warn("icloud sync failed", "mailbox_id", mailbox.ID, "err", result.syncErr)
 	}
@@ -1669,12 +2160,12 @@ func (s *Server) writeMailboxCode(w http.ResponseWriter, r *http.Request, mailbo
 	}
 	if result.syncErr != nil && allowStale {
 		if msg, code, ok := latestMailboxCodeSkipping(s.store.MessagesForMailbox(mailbox.ID), codeAfter, keyword, time.Now(), mailbox.LastCodeMessageID); ok {
-			s.writeMailboxCodeSuccess(w, mailbox, msg, code, "iCloud 同步失败，当前验证码来自本地缓存", true)
+			s.writeMailboxCodeSuccess(w, mailbox, msg, code, "取码同步失败，当前验证码来自本地缓存", true)
 			return
 		}
 	}
 	if result.syncErr != nil && !allowStale {
-		writeError(w, http.StatusBadGateway, errCode("icloud_sync_failed", "同步 iCloud 邮件失败，已拒绝返回本地旧验证码；请重新登录 iCloud 或稍后重试", true))
+		writeError(w, http.StatusBadGateway, errCode("mail_sync_failed", "同步验证码邮件失败，已拒绝返回本地旧验证码；请检查取码登录或稍后重试", true))
 		return
 	}
 	writeError(w, http.StatusOK, errCode("no_code", "暂未收到验证码", true))
@@ -1707,7 +2198,7 @@ func staleCacheMessage(err error) string {
 	if err == nil {
 		return ""
 	}
-	return "iCloud 同步失败，当前验证码来自本地缓存"
+	return "取码同步失败，当前验证码来自本地缓存"
 }
 
 func mailboxCodeAfter(after, now time.Time) time.Time {
@@ -1767,9 +2258,30 @@ func truthy(value string) bool {
 	}
 }
 
-func (s *Server) waitMailboxCode(ctx context.Context, mailbox Mailbox, after time.Time, keyword string, forceSync bool, skipMessageID string) mailboxCodeResult {
+func (s *Server) mailboxCodeWaitDuration(r *http.Request) time.Duration {
+	fallback := s.mailboxCodeFastWait
+	if r == nil {
+		return fallback
+	}
+	raw := strings.TrimSpace(r.URL.Query().Get("wait_ms"))
+	if raw == "" {
+		return fallback
+	}
+	fallbackMS := int(fallback / time.Millisecond)
+	maxMS := int(mailboxCodeMaxClientWait / time.Millisecond)
+	waitMS := parseBoundedPositiveInt(raw, fallbackMS, 1, maxMS)
+	return time.Duration(waitMS) * time.Millisecond
+}
+
+func (s *Server) waitMailboxCode(ctx context.Context, mailbox Mailbox, after time.Time, keyword string, forceSync bool, skipMessageID string, waitDuration time.Duration) mailboxCodeResult {
+	waitCtx := context.Background()
+	var requestDone <-chan struct{}
+	if ctx != nil {
+		waitCtx = context.WithoutCancel(ctx)
+		requestDone = ctx.Done()
+	}
 	waiter := &mailboxCodeWaiter{
-		ctx:           ctx,
+		ctx:           waitCtx,
 		mailboxID:     mailbox.ID,
 		after:         after,
 		keyword:       keyword,
@@ -1791,10 +2303,19 @@ func (s *Server) waitMailboxCode(ctx context.Context, mailbox Mailbox, after tim
 	poller.waiters = append(poller.waiters, waiter)
 	s.mailboxCodeMu.Unlock()
 
+	var timeout <-chan time.Time
+	var timer *time.Timer
+	if waitDuration > 0 {
+		timer = time.NewTimer(waitDuration)
+		timeout = timer.C
+		defer timer.Stop()
+	}
 	select {
 	case result := <-waiter.result:
 		return result
-	case <-ctx.Done():
+	case <-timeout:
+		return mailboxCodeResult{}
+	case <-requestDone:
 		return mailboxCodeResult{syncErr: ctx.Err()}
 	}
 }
@@ -1915,64 +2436,246 @@ func (s *Server) syncMailboxesForCodeWaiters(ctx context.Context, ownerID string
 	sort.Slice(mailboxes, func(i, j int) bool {
 		return mailboxes[i].Email < mailboxes[j].Email
 	})
-	return s.syncMailboxBatchForOwner(ctx, ownerID, mailboxes, minAfter, "OpenAI")
+	_, err := s.syncMailboxCodeBatchForOwnerWithLimit(ctx, ownerID, mailboxes, minAfter, "OpenAI", 0)
+	return err
+}
+
+func (s *Server) runMailWatcher(ctx context.Context) {
+	defer func() {
+		s.mailWatcherMu.Lock()
+		s.mailWatcherCancel = nil
+		s.mailWatcherMu.Unlock()
+	}()
+
+	s.syncMailWatcherRound(ctx, true)
+	interval := s.mailWatcherInterval
+	if interval <= 0 {
+		interval = mailWatcherPollInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.mailWatcherWake:
+			s.syncMailWatcherRound(ctx, false)
+		case <-ticker.C:
+			s.syncMailWatcherRound(ctx, false)
+		}
+	}
+}
+
+func (s *Server) syncMailWatcherRound(ctx context.Context, initial bool) {
+	if ctx.Err() != nil {
+		return
+	}
+	groups := s.mailWatcherGroups()
+	if len(groups) == 0 {
+		return
+	}
+	after := time.Time{}
+	fetchLimit := s.mailWatcherFetchLimit
+	if initial {
+		fetchLimit = s.mailWatcherInitialFetchLimit
+		if s.mailWatcherLookback > 0 {
+			after = time.Now().Add(-s.mailWatcherLookback)
+		}
+	}
+	if fetchLimit <= 0 {
+		fetchLimit = defaultMailWatcherFetchLimit
+	}
+	for _, group := range groups {
+		if ctx.Err() != nil {
+			return
+		}
+		syncCtx, cancel := context.WithTimeout(ctx, mailWatcherSyncTimeout)
+		_, err := s.syncMailboxCodeBatchForOwnerWithLimit(syncCtx, group.ownerID, group.mailboxes, after, "OpenAI", fetchLimit)
+		cancel()
+		if err != nil && ctx.Err() == nil && s.logger != nil {
+			s.logger.Warn("mail watcher sync failed", "owner", s.ownerName(group.ownerID), "mailboxes", len(group.mailboxes), "initial", initial, "err", err)
+		}
+	}
+}
+
+func (s *Server) markMailWatcherActive(mailboxID string) {
+	mailboxID = strings.TrimSpace(mailboxID)
+	if mailboxID == "" {
+		return
+	}
+	ttl := mailWatcherActiveTTL
+	if ttl <= 0 {
+		ttl = 20 * time.Minute
+	}
+	s.mailWatcherMu.Lock()
+	if s.mailWatcherActiveUntil == nil {
+		s.mailWatcherActiveUntil = make(map[string]time.Time)
+	}
+	s.mailWatcherActiveUntil[mailboxID] = time.Now().Add(ttl)
+	s.mailWatcherMu.Unlock()
+	s.pokeMailWatcher()
+}
+
+func (s *Server) pokeMailWatcher() {
+	if s == nil || !s.mailWatcherEnabled || s.mailWatcherWake == nil {
+		return
+	}
+	select {
+	case s.mailWatcherWake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Server) activeMailWatcherMailboxIDs(now time.Time) map[string]struct{} {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	s.mailWatcherMu.Lock()
+	defer s.mailWatcherMu.Unlock()
+	active := make(map[string]struct{})
+	for id, until := range s.mailWatcherActiveUntil {
+		if until.After(now) {
+			active[id] = struct{}{}
+			continue
+		}
+		delete(s.mailWatcherActiveUntil, id)
+	}
+	return active
+}
+
+func (s *Server) mailWatcherGroups() []mailboxWatcherOwnerGroup {
+	state := s.store.Snapshot()
+	activeIDs := s.activeMailWatcherMailboxIDs(time.Now())
+	byOwner := make(map[string][]Mailbox)
+	for _, mailbox := range state.Mailboxes {
+		if !mailbox.APIActive || !mailbox.ICloudActive || mailbox.Status == StatusDisabled {
+			continue
+		}
+		ownerID := strings.TrimSpace(mailbox.OwnerID)
+		if _, ok := s.imapStateForMailbox(ownerID, mailbox); !ok {
+			continue
+		}
+		byOwner[ownerID] = append(byOwner[ownerID], mailbox)
+	}
+	owners := make([]string, 0, len(byOwner))
+	for ownerID := range byOwner {
+		owners = append(owners, ownerID)
+	}
+	sort.Strings(owners)
+	groups := make([]mailboxWatcherOwnerGroup, 0, len(owners))
+	for _, ownerID := range owners {
+		mailboxes := byOwner[ownerID]
+		sort.Slice(mailboxes, func(i, j int) bool {
+			_, iActive := activeIDs[mailboxes[i].ID]
+			_, jActive := activeIDs[mailboxes[j].ID]
+			if iActive != jActive {
+				return iActive
+			}
+			return mailboxes[i].Email < mailboxes[j].Email
+		})
+		groups = append(groups, mailboxWatcherOwnerGroup{ownerID: ownerID, mailboxes: mailboxes})
+	}
+	return groups
 }
 
 func (s *Server) syncMailbox(ctx context.Context, mailbox Mailbox, after time.Time, keyword string) (int, error) {
-	release, err := s.acquireMailboxSyncSlot(ctx, mailbox.OwnerID)
+	return s.syncMailboxCodeBatchForOwnerWithLimit(ctx, mailbox.OwnerID, []Mailbox{mailbox}, after, keyword, mailboxSyncThreadLimit(mailbox))
+}
+
+func (s *Server) syncMailboxCodeBatchForOwnerWithLimit(ctx context.Context, ownerID string, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (int, error) {
+	if len(mailboxes) == 0 {
+		return 0, nil
+	}
+	release, err := s.acquireMailboxSyncSlot(ctx, ownerID)
 	if err != nil {
 		return 0, err
 	}
 	defer release()
 
-	if latestMailbox, ok := s.store.FindMailboxByID(mailbox.ID); ok {
-		mailbox = latestMailbox
-	}
-	if err := s.waitMailboxSyncInterval(ctx, mailbox.OwnerID); err != nil {
-		return 0, err
-	}
-	defer s.markMailboxSyncFinished(mailbox.OwnerID)
-	session, ok := s.sessionForMailbox(mailbox.OwnerID, mailbox.AccountID)
-	if !ok {
-		return 0, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先保存旧接口登录态", true)
-	}
-	syncFn := s.syncMailboxMessages
-	if syncFn == nil {
-		syncFn = func(ctx context.Context, session ICloudSession, mailbox Mailbox, after time.Time, keyword string, maxThreads int) ([]ICloudSyncedMessage, error) {
-			return NewICloudClient().SyncMailboxMessages(ctx, session, mailbox, after, keyword, maxThreads)
-		}
-	}
-	messages, err := syncFn(ctx, session, mailbox, after, keyword, mailboxSyncThreadLimit(mailbox))
-	if err != nil {
-		return 0, err
-	}
-	synced := 0
-	lastSyncUID := mailbox.LastSyncUID
-	lastSyncAt := time.Now()
-	latestMessageAt := mailbox.LastSyncAt
-	for _, msg := range messages {
-		if extractOTP(msg.Subject+"\n"+msg.Body) == "" {
+	refreshed := make([]Mailbox, 0, len(mailboxes))
+	for _, mailbox := range mailboxes {
+		latest, ok := s.store.FindMailboxByID(mailbox.ID)
+		if !ok || !latest.APIActive || latest.Status == StatusDisabled || !latest.ICloudActive {
 			continue
 		}
-		_, created, err := s.store.UpsertMessage(mailbox.ID, msg.RemoteID, "icloud", msg.Subject, msg.From, msg.Body, msg.ReceivedAt)
+		refreshed = append(refreshed, latest)
+	}
+	if len(refreshed) == 0 {
+		return 0, nil
+	}
+	if err := s.waitMailboxSyncInterval(ctx, ownerID); err != nil {
+		return 0, err
+	}
+	defer s.markMailboxSyncFinished(ownerID)
+
+	syncFn := s.syncCodeMailboxBatch
+	if syncFn == nil {
+		syncFn = SyncICloudIMAPMessages
+	}
+	type imapGroup struct {
+		state     LoginState
+		mailboxes []Mailbox
+	}
+	groups := make(map[string]*imapGroup)
+	order := make([]string, 0)
+	for _, mailbox := range refreshed {
+		state, ok := s.imapStateForMailbox(ownerID, mailbox)
+		if !ok {
+			return 0, errCode("imap_session_missing", "未保存取码登录，请先保存 iCloud 邮箱账号和 App 专用密码", true)
+		}
+		key := imapStateKey(state)
+		group := groups[key]
+		if group == nil {
+			group = &imapGroup{state: state}
+			groups[key] = group
+			order = append(order, key)
+		}
+		group.mailboxes = append(group.mailboxes, mailbox)
+	}
+	now := time.Now()
+	synced := 0
+	for _, key := range order {
+		group := groups[key]
+		messagesByMailbox, err := syncFn(ctx, group.state, group.mailboxes, after, keyword, maxMessages)
 		if err != nil {
 			return synced, err
 		}
-		if created {
-			synced++
+		for _, mailbox := range group.mailboxes {
+			lastSyncUID := mailbox.LastSyncUID
+			latestMessageAt := mailbox.LastSyncAt
+			for _, msg := range messagesByMailbox[mailbox.ID] {
+				if extractOTP(msg.Subject+"\n"+msg.Body) == "" {
+					continue
+				}
+				remoteID := strings.TrimSpace(msg.RemoteID)
+				if remoteID == "" && strings.TrimSpace(msg.UID) != "" {
+					remoteID = "imap:" + strings.TrimSpace(msg.UID)
+				}
+				_, created, err := s.store.UpsertMessage(mailbox.ID, remoteID, "imap", msg.Subject, msg.From, msg.Body, msg.ReceivedAt)
+				if err != nil {
+					return synced, err
+				}
+				if created {
+					synced++
+				}
+				if msg.ReceivedAt.After(latestMessageAt) {
+					latestMessageAt = msg.ReceivedAt
+					lastSyncUID = firstNonEmpty(msg.UID, remoteID)
+				}
+			}
+			if _, err := s.store.SetMailboxSyncCursor(mailbox.ID, now, lastSyncUID); err != nil {
+				return synced, err
+			}
 		}
-		if msg.ReceivedAt.After(latestMessageAt) {
-			latestMessageAt = msg.ReceivedAt
-			lastSyncUID = firstNonEmpty(msg.UID, msg.RemoteID)
-		}
-	}
-	if _, err := s.store.SetMailboxSyncCursor(mailbox.ID, lastSyncAt, lastSyncUID); err != nil {
-		return synced, err
 	}
 	return synced, nil
 }
 
 func (s *Server) syncMailboxBatchForOwner(ctx context.Context, ownerID string, mailboxes []Mailbox, after time.Time, keyword string) error {
+	return s.syncMailboxBatchForOwnerWithLimit(ctx, ownerID, mailboxes, after, keyword, 0)
+}
+
+func (s *Server) syncMailboxBatchForOwnerWithLimit(ctx context.Context, ownerID string, mailboxes []Mailbox, after time.Time, keyword string, maxThreadsOverride int) error {
 	if len(mailboxes) == 0 {
 		return nil
 	}
@@ -2026,7 +2729,11 @@ func (s *Server) syncMailboxBatchForOwner(ctx context.Context, ownerID string, m
 	now := time.Now()
 	for _, key := range order {
 		group := groups[key]
-		messagesByMailbox, err := syncFn(ctx, group.session, group.mailboxes, after, keyword, mailboxBatchThreadLimit(group.mailboxes))
+		maxThreads := mailboxBatchThreadLimit(group.mailboxes)
+		if maxThreadsOverride > 0 {
+			maxThreads = maxThreadsOverride
+		}
+		messagesByMailbox, err := syncFn(ctx, group.session, group.mailboxes, after, keyword, maxThreads)
 		if err != nil {
 			return err
 		}
@@ -2089,7 +2796,7 @@ func (s *Server) acquireMailboxSyncSlot(ctx context.Context, ownerID string) (fu
 }
 
 func (s *Server) waitMailboxSyncInterval(ctx context.Context, ownerID string) error {
-	interval := mailboxMailSyncMinInterval
+	interval := s.mailboxSyncMinInterval
 	if interval <= 0 {
 		return nil
 	}
@@ -2607,6 +3314,30 @@ func (s *Server) sessionForMailbox(ownerID, accountID string) (ICloudSession, bo
 	return ICloudSession{}, false
 }
 
+func (s *Server) imapStateForMailbox(ownerID string, mailbox Mailbox) (LoginState, bool) {
+	if session, ok := s.sessionForOwnerAccount(ownerID, mailbox.AccountID); ok {
+		if state, ok := iCloudIMAPLoginState(session); ok {
+			return state, true
+		}
+	}
+	var found []LoginState
+	for _, session := range s.sessionsForOwner(ownerID, "") {
+		if state, ok := iCloudIMAPLoginState(session); ok {
+			found = append(found, state)
+		}
+	}
+	if len(found) == 1 {
+		return found[0], true
+	}
+	return LoginState{}, false
+}
+
+func imapStateKey(state LoginState) string {
+	return strings.ToLower(strings.TrimSpace(firstNonEmpty(state.IMAPEmail, state.IMAPUsername))) + "|" +
+		strings.ToLower(strings.TrimSpace(firstNonEmpty(state.IMAPHost, defaultICloudIMAPHost))) + "|" +
+		strconv.Itoa(state.IMAPPort)
+}
+
 func (s *Server) publicSessionForRequest(r *http.Request) publicICloudSession {
 	session, ok := s.sessionForRequest(r)
 	if !ok {
@@ -2633,6 +3364,7 @@ func publicCreateSettings(settings CreateSettings) map[string]any {
 		"scheduler_create_channel_label":   mailboxCreateChannelLabel(schedulerChannel),
 		"scheduler_interval_minutes":       settings.SchedulerIntervalMinutes,
 		"scheduler_round_interval_seconds": settings.SchedulerRoundIntervalSeconds,
+		"mailbox_page_size":                settings.MailboxPageSize,
 		"updated_at":                       formatTime(settings.UpdatedAt),
 	}
 }
@@ -2713,6 +3445,8 @@ func (s *Server) allowsUserSession(r *http.Request) bool {
 			"/api/apple-account/login/start",
 			"/api/apple-account/login/2fa",
 			"/api/icloud/session/check",
+			"/api/icloud/imap-login/save",
+			"/api/icloud/imap-login/check",
 			"/api/icloud/mailboxes/create",
 			"/api/icloud/mailboxes/sync",
 			"/api/icloud/scheduler/start",
@@ -3043,8 +3777,10 @@ func publicSession(session *ICloudSession) publicICloudSession {
 	}
 	icloudWebLoginSaved := iCloudWebLoginSaved(*session)
 	appleAccountLoginSaved := appleAccountLoginSaved(*session)
+	icloudIMAPLoginSaved := iCloudIMAPLoginSaved(*session)
 	icloudWebState, _ := iCloudWebLoginState(*session)
 	appleAccountState, _ := appleAccountLoginState(*session)
+	icloudIMAPState, _ := iCloudIMAPLoginState(*session)
 	appleAccountNextRefreshAt := time.Time{}
 	if appleAccountLoginSaved && !appleAccountState.ManageExpiresAt.IsZero() {
 		appleAccountNextRefreshAt = appleAccountState.ManageExpiresAt.Add(-appleAccountManageRefreshSkew)
@@ -3075,8 +3811,14 @@ func publicSession(session *ICloudSession) publicICloudSession {
 		AppleAccountNextRefreshAt:   formatTime(appleAccountNextRefreshAt),
 		AppleAccountManageExpiresAt: formatTime(appleAccountState.ManageExpiresAt),
 		AppleAccountManageReady:     appleAccountManageReady(*session),
+		ICloudIMAPLoginSaved:        icloudIMAPLoginSaved,
+		ICloudIMAPLoginChecked:      !icloudIMAPState.LastCheckedAt.IsZero(),
+		ICloudIMAPLoginOK:           icloudIMAPState.LastCheckOK,
+		ICloudIMAPLoginStatus:       loginStatePublicStatus(icloudIMAPLoginSaved, icloudIMAPState),
+		ICloudIMAPEmail:             normalizeICloudIMAPEmail(icloudIMAPState.IMAPEmail),
+		ICloudIMAPHost:              firstNonEmpty(strings.TrimSpace(icloudIMAPState.IMAPHost), strings.TrimSpace(icloudIMAPState.Host)),
 		ProviderConfigured:          session.IsICloudPlus && session.CanCreateHME && icloudWebLoginSaved,
-		NeedsManualLogin:            !icloudWebLoginSaved && !appleAccountLoginSaved,
+		NeedsManualLogin:            !icloudWebLoginSaved && !appleAccountLoginSaved && !icloudIMAPLoginSaved,
 		LastCheckedAt:               formatTime(session.LastCheckedAt),
 		LastCheckOK:                 session.LastCheckOK,
 		LastStatusMessage:           message,
@@ -3143,9 +3885,61 @@ func withICloudWebLoginState(session ICloudSession, next LoginState) ICloudSessi
 	return session
 }
 
+func iCloudIMAPLoginSaved(session ICloudSession) bool {
+	_, ok := iCloudIMAPLoginState(session)
+	return ok
+}
+
+func iCloudIMAPLoginState(session ICloudSession) (LoginState, bool) {
+	for _, state := range session.LoginStates {
+		if state.Kind != LoginStateICloudIMAP {
+			continue
+		}
+		email := normalizeICloudIMAPEmail(state.IMAPEmail)
+		if email == "" {
+			email = normalizeICloudIMAPEmail(session.AppleID)
+		}
+		if email == "" || strings.TrimSpace(state.IMAPAppPassword) == "" {
+			continue
+		}
+		state.IMAPEmail = email
+		state.IMAPUsername = firstNonEmpty(strings.TrimSpace(state.IMAPUsername), email)
+		state.IMAPHost = firstNonEmpty(strings.TrimSpace(state.IMAPHost), defaultICloudIMAPHost)
+		if state.IMAPPort == 0 {
+			state.IMAPPort = defaultICloudIMAPPort
+		}
+		return state, true
+	}
+	return LoginState{}, false
+}
+
+func withICloudIMAPLoginState(session ICloudSession, next LoginState) ICloudSession {
+	next.Kind = LoginStateICloudIMAP
+	next.IMAPEmail = normalizeICloudIMAPEmail(firstNonEmpty(next.IMAPEmail, session.AppleID))
+	next.IMAPUsername = firstNonEmpty(strings.TrimSpace(next.IMAPUsername), next.IMAPEmail)
+	next.IMAPHost = firstNonEmpty(strings.TrimSpace(next.IMAPHost), defaultICloudIMAPHost)
+	next.Host = firstNonEmpty(strings.TrimSpace(next.Host), next.IMAPHost)
+	next.Origin = firstNonEmpty(strings.TrimSpace(next.Origin), "imaps://"+next.IMAPHost)
+	if next.IMAPPort == 0 {
+		next.IMAPPort = defaultICloudIMAPPort
+	}
+	for i, state := range session.LoginStates {
+		if state.Kind == LoginStateICloudIMAP {
+			session.LoginStates[i] = next
+			return session
+		}
+	}
+	session.LoginStates = append(session.LoginStates, next)
+	return session
+}
+
 func appleAccountLoginSaved(session ICloudSession) bool {
 	_, ok := appleAccountLoginState(session)
 	return ok
+}
+
+func normalizeICloudIMAPEmail(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func publicSessionForAppleID(sessions []publicICloudSession, appleID string) publicICloudSession {

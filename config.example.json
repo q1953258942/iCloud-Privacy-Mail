@@ -6,5 +6,12 @@
   "public_base_url": "",
   "icloud_default_host": "www.icloud.com.cn",
   "icloud_client_id": "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d",
-  "apple_account_api_key": ""
+  "apple_account_api_key": "",
+  "mail_watcher_enabled": true,
+  "mail_watcher_poll_ms": 3000,
+  "mail_watcher_fetch_limit": 8,
+  "mail_watcher_initial_fetch_limit": 20,
+  "mail_watcher_lookback_hours": 24,
+  "public_fast_sync_wait_ms": 600,
+  "public_sync_min_interval_ms": 3000
 }

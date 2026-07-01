@@ -5,32 +5,47 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
 type Config struct {
-	ConfigPath         string `json:"-"`
-	Host               string `json:"host"`
-	Port               int    `json:"port"`
-	DataPath           string `json:"data_path"`
-	APIKey             string `json:"api_key"`
-	PublicBaseURL      string `json:"public_base_url"`
-	ICloudDefaultHost  string `json:"icloud_default_host"`
-	ICloudClientID     string `json:"icloud_client_id"`
-	AppleAccountAPIKey string `json:"apple_account_api_key"`
+	ConfigPath                   string `json:"-"`
+	Host                         string `json:"host"`
+	Port                         int    `json:"port"`
+	DataPath                     string `json:"data_path"`
+	APIKey                       string `json:"api_key"`
+	PublicBaseURL                string `json:"public_base_url"`
+	ICloudDefaultHost            string `json:"icloud_default_host"`
+	ICloudClientID               string `json:"icloud_client_id"`
+	AppleAccountAPIKey           string `json:"apple_account_api_key"`
+	MailWatcherEnabled           bool   `json:"mail_watcher_enabled"`
+	MailWatcherPollMS            int    `json:"mail_watcher_poll_ms"`
+	MailWatcherFetchLimit        int    `json:"mail_watcher_fetch_limit"`
+	MailWatcherInitialFetchLimit int    `json:"mail_watcher_initial_fetch_limit"`
+	MailWatcherLookbackHours     int    `json:"mail_watcher_lookback_hours"`
+	PublicFastSyncWaitMS         int    `json:"public_fast_sync_wait_ms"`
+	PublicSyncMinIntervalMS      int    `json:"public_sync_min_interval_ms"`
 }
 
 func LoadConfig(path string) (Config, error) {
 	cfg := Config{
-		ConfigPath:         path,
-		Host:               "127.0.0.1",
-		Port:               8787,
-		DataPath:           filepath.Join("data", "state.json"),
-		APIKey:             strings.TrimSpace(os.Getenv("IPM_API_KEY")),
-		PublicBaseURL:      strings.TrimRight(strings.TrimSpace(os.Getenv("IPM_PUBLIC_BASE_URL")), "/"),
-		ICloudDefaultHost:  "www.icloud.com.cn",
-		ICloudClientID:     defaultAppleOAuthClientID,
-		AppleAccountAPIKey: strings.TrimSpace(os.Getenv("IPM_APPLE_ACCOUNT_API_KEY")),
+		ConfigPath:                   path,
+		Host:                         "127.0.0.1",
+		Port:                         8787,
+		DataPath:                     filepath.Join("data", "state.json"),
+		APIKey:                       strings.TrimSpace(os.Getenv("IPM_API_KEY")),
+		PublicBaseURL:                strings.TrimRight(strings.TrimSpace(os.Getenv("IPM_PUBLIC_BASE_URL")), "/"),
+		ICloudDefaultHost:            "www.icloud.com.cn",
+		ICloudClientID:               defaultAppleOAuthClientID,
+		AppleAccountAPIKey:           strings.TrimSpace(os.Getenv("IPM_APPLE_ACCOUNT_API_KEY")),
+		MailWatcherEnabled:           envBool("MAIL_WATCHER_ENABLED", true),
+		MailWatcherPollMS:            envPositiveInt("MAIL_WATCHER_POLL_MS", 3000),
+		MailWatcherFetchLimit:        envPositiveInt("MAIL_WATCHER_FETCH_LIMIT", 8),
+		MailWatcherInitialFetchLimit: envPositiveInt("MAIL_WATCHER_INITIAL_FETCH_LIMIT", 20),
+		MailWatcherLookbackHours:     envPositiveInt("MAIL_WATCHER_LOOKBACK_HOURS", 24),
+		PublicFastSyncWaitMS:         envPositiveInt("PUBLIC_FAST_SYNC_WAIT_MS", 600),
+		PublicSyncMinIntervalMS:      envPositiveInt("PUBLIC_SYNC_MIN_INTERVAL_MS", 3000),
 	}
 	if path == "" {
 		return cfg, nil
@@ -44,6 +59,10 @@ func LoadConfig(path string) (Config, error) {
 	}
 	var fromFile Config
 	if err := json.Unmarshal(data, &fromFile); err != nil {
+		return Config{}, err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return Config{}, err
 	}
 	if fromFile.Host != "" {
@@ -70,5 +89,57 @@ func LoadConfig(path string) (Config, error) {
 	if strings.TrimSpace(fromFile.AppleAccountAPIKey) != "" {
 		cfg.AppleAccountAPIKey = strings.TrimSpace(fromFile.AppleAccountAPIKey)
 	}
+	if rawValue, ok := raw["mail_watcher_enabled"]; ok {
+		var enabled bool
+		if err := json.Unmarshal(rawValue, &enabled); err != nil {
+			return Config{}, err
+		}
+		cfg.MailWatcherEnabled = enabled
+	}
+	if fromFile.MailWatcherPollMS > 0 {
+		cfg.MailWatcherPollMS = fromFile.MailWatcherPollMS
+	}
+	if fromFile.MailWatcherFetchLimit > 0 {
+		cfg.MailWatcherFetchLimit = fromFile.MailWatcherFetchLimit
+	}
+	if fromFile.MailWatcherInitialFetchLimit > 0 {
+		cfg.MailWatcherInitialFetchLimit = fromFile.MailWatcherInitialFetchLimit
+	}
+	if fromFile.MailWatcherLookbackHours > 0 {
+		cfg.MailWatcherLookbackHours = fromFile.MailWatcherLookbackHours
+	}
+	if fromFile.PublicFastSyncWaitMS > 0 {
+		cfg.PublicFastSyncWaitMS = fromFile.PublicFastSyncWaitMS
+	}
+	if fromFile.PublicSyncMinIntervalMS > 0 {
+		cfg.PublicSyncMinIntervalMS = fromFile.PublicSyncMinIntervalMS
+	}
 	return cfg, nil
+}
+
+func envBool(name string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	if value == "" {
+		return fallback
+	}
+	switch value {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
+func envPositiveInt(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
 }
