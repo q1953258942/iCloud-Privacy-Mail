@@ -1539,20 +1539,29 @@
       return text.length > 22 ? `${text.slice(0, 22)}...` : text;
     }
 
+    function releaseChangeText(notes) {
+      const raw = String(notes || '').replace(/\r\n/g, '\n').trim();
+      if (!raw) return '暂无更新内容';
+      const lines = raw.split('\n');
+      let start = 0;
+      const marker = lines.findIndex((line) => /^\s*(本次公开版更新|更新内容)[:：]?\s*$/.test(line));
+      if (marker >= 0) start = marker + 1;
+      const out = [];
+      for (let i = start; i < lines.length; i += 1) {
+        const line = lines[i].trimEnd();
+        const clean = line.trim();
+        if (/^\s*#{1,6}\s+/.test(line)) continue;
+        if (/^(资产|构建提交|构建信息|数据安全|校验|Release\s*资产)[:：]?\s*$/.test(clean)) break;
+        if (/^(资产|构建提交)[:：]/.test(clean)) break;
+        if (!clean && out.length === 0) continue;
+        out.push(line);
+      }
+      return out.join('\n').trim() || '暂无更新内容';
+    }
+
     function updateTooltip(status) {
-      if (!status) return '正在检查最新版本';
-      const current = status.current && status.current.version ? status.current.version : '-';
-      const latest = status.latest_version || '-';
-      const lines = [
-        `当前版本：${current}`,
-        `最新版本：${latest}`
-      ];
-      if (status.latest_name) lines.push(`最新来源：${status.latest_name}`);
-      if (status.published_at) lines.push(`发布时间：${exactTimeText(status.published_at)}`);
-      if (status.asset_name) lines.push(`更新包：${status.asset_name}`);
-      if (status.error) lines.push(`检查失败：${status.error}`);
-      if (status.latest_notes) lines.push('', '更新内容：', status.latest_notes);
-      return lines.join('\n');
+      if (!status) return '正在检查更新内容';
+      return releaseChangeText(status.latest_notes);
     }
 
     function renderUpdateStatus(status) {
