@@ -125,6 +125,13 @@ Copy-Item .\config.example.json .\config.json
 
 Linux 服务器建议使用 systemd 托管并设置 `Restart=on-failure` 或 `Restart=always`。在线更新替换二进制后会用非 0 退出码结束当前进程，交给 systemd 自动拉起新版。Windows 运行中的 exe 不支持安全自替换，面板只提供检测，不执行在线替换。
 
+发布边界：
+
+- 每次修复功能、问题或公开行为，都必须提升 `AppVersion`、提交 Git，并发布新的 GitHub Release。
+- GitHub Release 必须上传裸二进制资产，至少包含 `icloud-privacy-mail_linux_amd64`；Windows 可附带 `icloud-privacy-mail_windows_amd64.exe` 供手动下载。
+- 在线更新只读取 GitHub `latest release` 或 `update_manifest_url` 指向的最新版本，不要求用户逐个中间版本升级；从任意旧版本点击更新都会直接更新到最新 Release。
+- `data_path`、`config.json`、Apple 登录态、Cookie、取码缓存和运行数据不属于 Release 资产，更新时不覆盖。
+
 ## 本地运行
 
 ```powershell
