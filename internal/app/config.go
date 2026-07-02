@@ -28,6 +28,10 @@ type Config struct {
 	MailWatcherLookbackHours     int    `json:"mail_watcher_lookback_hours"`
 	PublicFastSyncWaitMS         int    `json:"public_fast_sync_wait_ms"`
 	PublicSyncMinIntervalMS      int    `json:"public_sync_min_interval_ms"`
+	UpdateEnabled                bool   `json:"update_enabled"`
+	UpdateRepository             string `json:"update_repository"`
+	UpdateManifestURL            string `json:"update_manifest_url"`
+	UpdateAssetName              string `json:"update_asset_name"`
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -50,6 +54,10 @@ func LoadConfig(path string) (Config, error) {
 		MailWatcherLookbackHours:     envPositiveInt("MAIL_WATCHER_LOOKBACK_HOURS", 24),
 		PublicFastSyncWaitMS:         envPositiveInt("PUBLIC_FAST_SYNC_WAIT_MS", 600),
 		PublicSyncMinIntervalMS:      envPositiveInt("PUBLIC_SYNC_MIN_INTERVAL_MS", 3000),
+		UpdateEnabled:                envBool("IPM_UPDATE_ENABLED", true),
+		UpdateRepository:             firstNonEmptyString(strings.TrimSpace(os.Getenv("IPM_UPDATE_REPOSITORY")), "q1953258942/iCloud-Privacy-Mail"),
+		UpdateManifestURL:            strings.TrimSpace(os.Getenv("IPM_UPDATE_MANIFEST_URL")),
+		UpdateAssetName:              strings.TrimSpace(os.Getenv("IPM_UPDATE_ASSET_NAME")),
 	}
 	if path == "" {
 		return cfg, nil
@@ -128,7 +136,32 @@ func LoadConfig(path string) (Config, error) {
 	if fromFile.PublicSyncMinIntervalMS > 0 {
 		cfg.PublicSyncMinIntervalMS = fromFile.PublicSyncMinIntervalMS
 	}
+	if rawValue, ok := raw["update_enabled"]; ok {
+		var enabled bool
+		if err := json.Unmarshal(rawValue, &enabled); err != nil {
+			return Config{}, err
+		}
+		cfg.UpdateEnabled = enabled
+	}
+	if strings.TrimSpace(fromFile.UpdateRepository) != "" {
+		cfg.UpdateRepository = strings.TrimSpace(fromFile.UpdateRepository)
+	}
+	if strings.TrimSpace(fromFile.UpdateManifestURL) != "" {
+		cfg.UpdateManifestURL = strings.TrimSpace(fromFile.UpdateManifestURL)
+	}
+	if strings.TrimSpace(fromFile.UpdateAssetName) != "" {
+		cfg.UpdateAssetName = strings.TrimSpace(fromFile.UpdateAssetName)
+	}
 	return cfg, nil
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func envBool(name string, fallback bool) bool {

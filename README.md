@@ -72,6 +72,10 @@ Copy-Item .\config.example.json .\config.json
 | `public_base_url` | 对外复制 API 地址用的公网地址，例如 `https://www.example.com` |
 | `icloud_default_host` | iCloud 登录态校验 Host，默认 `www.icloud.com.cn` |
 | `icloud_client_id` | iCloud Web 公共 Client ID，通常不用修改 |
+| `update_enabled` | 是否启用面板“检测更新/在线更新”，默认 `true` |
+| `update_repository` | 未配置 manifest 时读取的 GitHub 仓库，默认 `q1953258942/iCloud-Privacy-Mail` |
+| `update_manifest_url` | 可选的更新 manifest 地址；配置后优先按 manifest 选择当前系统架构的二进制和 sha256 |
+| `update_asset_name` | 可选的发布资产文件名；不填时自动匹配当前 `os/arch` |
 
 示例：
 
@@ -83,13 +87,43 @@ Copy-Item .\config.example.json .\config.json
   "api_key": "CHANGE_ME_GLOBAL_API_KEY",
   "public_base_url": "https://www.example.com",
   "icloud_default_host": "www.icloud.com.cn",
-  "icloud_client_id": "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d"
+  "icloud_client_id": "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d",
+  "update_enabled": true,
+  "update_repository": "q1953258942/iCloud-Privacy-Mail",
+  "update_manifest_url": "",
+  "update_asset_name": ""
 }
 ```
 
 > 管理面板只支持账号密码登录；旧版 Admin Key 管理入口已移除。
 >
 > `data_path` 是唯一真实数据源，里面包含平台用户、Apple 登录态、隐私邮箱、邮件缓存和每个邮箱的 `mailbox_key`。部署、迁移或合并数据前必须先备份这个文件。
+
+### 在线更新
+
+面板顶部会显示当前版本；鼠标移到版本号上会显示最新版本号、发布时间和更新内容。管理员检测到新版本后可点击“更新”下载对应系统架构的二进制并替换当前程序，`data_path` 不会被覆盖。
+
+在线更新默认读取 GitHub 最新 Release，并自动匹配文件名中包含当前 `GOOS/GOARCH` 的资产。更稳妥的公开发布方式是配置 `update_manifest_url`，manifest 格式如下：
+
+```json
+{
+  "version": "2026.07.02",
+  "name": "2026.07.02",
+  "notes": "修复登录态保活显示，新增在线更新检测。",
+  "published_at": "2026-07-02T00:00:00Z",
+  "assets": [
+    {
+      "name": "panel_linux_amd64",
+      "os": "linux",
+      "arch": "amd64",
+      "url": "https://github.com/q1953258942/iCloud-Privacy-Mail/releases/download/2026.07.02/panel_linux_amd64",
+      "sha256": "..."
+    }
+  ]
+}
+```
+
+Linux 服务器建议使用 systemd 托管并设置 `Restart=always`。在线更新替换二进制后会退出当前进程，交给 systemd 自动拉起新版。Windows 运行中的 exe 不支持安全自替换，面板只提供检测，不执行在线替换。
 
 ## 本地运行
 

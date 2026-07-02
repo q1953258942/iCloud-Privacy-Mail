@@ -88,6 +88,10 @@ type Server struct {
 	syncCodeMailboxBatchWithCursor func(ctx context.Context, state LoginState, mailboxes []Mailbox, after time.Time, keyword string, maxMessages int) (iCloudIMAPSyncResult, error)
 	latestIMAPUID                  func(ctx context.Context, state LoginState) (string, error)
 	checkIMAPLogin                 func(ctx context.Context, email, appPassword string) error
+	updateMu                       sync.Mutex
+	updateApplyMu                  sync.Mutex
+	updateCache                    updateCandidate
+	updateCacheAt                  time.Time
 }
 
 type createMailboxFailure struct {
@@ -338,6 +342,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
 	s.mux.HandleFunc("DELETE /api/admin/users/{id}", s.handleAdminDeleteUser)
 	s.mux.HandleFunc("GET /api/status", s.handleStatus)
+	s.mux.HandleFunc("GET /api/update/status", s.handleUpdateStatus)
+	s.mux.HandleFunc("POST /api/update/apply", s.handleApplyUpdate)
 	s.mux.HandleFunc("GET /api/create-settings", s.handleCreateSettings)
 	s.mux.HandleFunc("POST /api/create-settings", s.handleSaveCreateSettings)
 	s.mux.HandleFunc("GET /api/manage/data", s.handleManageData)
@@ -589,6 +595,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"messages":           len(state.Messages),
 		"icloud_session":     s.publicSessionForRequest(r),
 		"icloud_sessions":    s.publicSessionsForRequest(r),
+		"version":            currentVersionInfo(),
 	})
 }
 
@@ -2804,16 +2811,27 @@ func (s *Server) keepAliveAppleAccountRound(ctx context.Context) {
 func (s *Server) appleAccountKeepAliveSessions() []ICloudSession {
 	state := s.store.Snapshot()
 	out := make([]ICloudSession, 0, len(state.ICloudSessions)+1)
-	if state.ICloudSession != nil && appleAccountLoginSaved(*state.ICloudSession) {
+	if state.ICloudSession != nil && appleAccountKeepAliveEligible(*state.ICloudSession) {
 		out = append(out, cloneICloudSession(*state.ICloudSession))
 	}
 	for _, session := range state.ICloudSessions {
-		if !appleAccountLoginSaved(session) {
+		if !appleAccountKeepAliveEligible(session) {
 			continue
 		}
 		out = append(out, cloneICloudSession(session))
 	}
 	return out
+}
+
+func appleAccountKeepAliveEligible(session ICloudSession) bool {
+	state, ok := appleAccountLoginState(session)
+	if !ok || strings.TrimSpace(state.APIKey) == "" {
+		return false
+	}
+	if !state.LastCheckedAt.IsZero() && !state.LastCheckOK {
+		return false
+	}
+	return true
 }
 
 func appleAccountKeepAliveIntervalForSession(session ICloudSession, base time.Duration) time.Duration {
@@ -4050,6 +4068,9 @@ func (s *Server) allowsUserSession(r *http.Request) bool {
 	if r.Method == http.MethodGet && r.URL.Path == "/api/status" {
 		return true
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/api/update/status" {
+		return true
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/api/create-settings" {
 		return true
 	}
@@ -4425,7 +4446,7 @@ func publicSessionWithKeepAliveInterval(session *ICloudSession, keepAliveInterva
 	appleAccountState, _ := appleAccountLoginState(*session)
 	icloudIMAPState, _ := iCloudIMAPLoginState(*session)
 	appleAccountNextRefreshAt := time.Time{}
-	if appleAccountLoginSaved && !appleAccountState.LastCheckedAt.IsZero() {
+	if appleAccountKeepAliveEligible(*session) && !appleAccountState.LastCheckedAt.IsZero() {
 		appleAccountNextRefreshAt = appleAccountState.LastCheckedAt.Add(appleAccountKeepAliveIntervalForSession(*session, keepAliveInterval))
 	}
 	return publicICloudSession{

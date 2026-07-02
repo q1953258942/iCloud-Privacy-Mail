@@ -389,6 +389,47 @@
       font-size: 13px;
       font-weight: 800;
     }
+    .version-dock {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 42px;
+      padding: 6px 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--soft-glass);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .36);
+    }
+    .version-badge {
+      max-width: 260px;
+      padding: 6px 9px;
+      border-radius: 999px;
+      color: var(--muted);
+      background: var(--glass);
+      border: 1px solid var(--line);
+      font-size: 12px;
+      font-weight: 900;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .version-badge.available {
+      color: var(--warn);
+      border-color: var(--warn-line);
+      background: var(--warn-soft);
+    }
+    .version-badge.current {
+      color: var(--ok);
+      border-color: var(--ok-line);
+      background: var(--ok-soft);
+    }
+    .version-dock button {
+      min-height: 30px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 900;
+    }
     .content-main { padding: 0; }
     .global-log-panel {
       margin: 0;
@@ -721,6 +762,11 @@
       border-color: var(--warn-line);
       background: var(--warn-soft);
     }
+    .manage-refresh-clock.stopped {
+      color: var(--faint);
+      border-color: var(--line);
+      background: var(--soft-glass);
+    }
     .session-card-line {
       display: flex;
       flex-wrap: wrap;
@@ -912,7 +958,7 @@
       .content-main { padding: 0; }
       .global-log-panel { margin-left: 16px; margin-right: 16px; }
       .content-head { align-items: flex-start; flex-direction: column; }
-      .content-actions, .content-actions > button, .account-dock, .appearance-controls { width: 100%; }
+      .content-actions, .content-actions > button, .account-dock, .appearance-controls, .version-dock { width: 100%; }
       .account-dock { grid-template-columns: 1fr 1fr; }
       .account-dock .user-badge { grid-column: 1 / -1; }
       .grid, .quick-grid, .field-grid { grid-template-columns: 1fr; }
@@ -1097,6 +1143,10 @@
           </div>
           <button onclick="openRunConfig()">运行配置</button>
           <button class="primary" onclick="refresh()">刷新状态</button>
+          <div class="version-dock">
+            <span class="version-badge" id="versionBadge" title="正在检查最新版本">版本 -</span>
+            <button id="updateButton" class="ghost" onclick="applyAppUpdate()" hidden>更新</button>
+          </div>
           <div class="account-dock">
             <div class="user-badge" id="currentUserBadge">未登录</div>
             <button onclick="location.href='/manage'">账号数据</button>
@@ -1361,6 +1411,7 @@
     let runtimeLogText = '等待操作...';
     let createLogText = '暂无创建记录。';
     let scheduleLogText = '暂无定时创建记录。';
+    let lastUpdateStatus = null;
     const viewMeta = {
       overview: ['概览', '查看账号、邮箱和验证码数量。'],
       session: ['登录态', '保存和检测 Apple 登录态。'],
@@ -1480,6 +1531,93 @@
         $('currentUserBadge').textContent = `${currentUser.username}${currentUser.is_admin ? ' / 管理员' : ''}`;
       }
       return currentUser;
+    }
+
+    function shortVersion(value) {
+      const text = String(value || '').trim();
+      if (!text) return '-';
+      return text.length > 22 ? `${text.slice(0, 22)}...` : text;
+    }
+
+    function updateTooltip(status) {
+      if (!status) return '正在检查最新版本';
+      const current = status.current && status.current.version ? status.current.version : '-';
+      const latest = status.latest_version || '-';
+      const lines = [
+        `当前版本：${current}`,
+        `最新版本：${latest}`
+      ];
+      if (status.published_at) lines.push(`发布时间：${exactTimeText(status.published_at)}`);
+      if (status.asset_name) lines.push(`更新包：${status.asset_name}`);
+      if (status.error) lines.push(`检查失败：${status.error}`);
+      if (status.latest_notes) lines.push('', '更新内容：', status.latest_notes);
+      return lines.join('\n');
+    }
+
+    function renderUpdateStatus(status) {
+      lastUpdateStatus = status || null;
+      const badge = $('versionBadge');
+      const button = $('updateButton');
+      if (!badge) return;
+      badge.classList.remove('available', 'current');
+      if (!status) {
+        badge.textContent = '版本 -';
+        badge.title = '正在检查最新版本';
+        if (button) button.hidden = true;
+        return;
+      }
+      const current = status.current && status.current.version ? status.current.version : '-';
+      const latest = status.latest_version || '';
+      if (status.update_available) {
+        badge.textContent = `当前 ${shortVersion(current)} / 最新 ${shortVersion(latest)}`;
+        badge.classList.add('available');
+      } else {
+        badge.textContent = `版本 ${shortVersion(current)}`;
+        badge.classList.add('current');
+      }
+      badge.title = updateTooltip(status);
+      if (button) {
+        const canUpdate = currentUser && currentUser.is_admin && status.update_available && status.asset_available && !status.error;
+        button.hidden = !canUpdate;
+        button.disabled = !canUpdate;
+        button.title = canUpdate ? '下载最新版本并重启服务' : updateTooltip(status);
+      }
+    }
+
+    async function loadUpdateStatus(force = false) {
+      try {
+        const data = await api(`/api/update/status${force ? '?force=1' : ''}`);
+        renderUpdateStatus(data.update || null);
+      } catch (err) {
+        renderUpdateStatus({
+          enabled: false,
+          current: {version: lastUpdateStatus && lastUpdateStatus.current ? lastUpdateStatus.current.version : '-'},
+          error: err.message
+        });
+      }
+    }
+
+    async function applyAppUpdate() {
+      const button = $('updateButton');
+      if (!lastUpdateStatus || !lastUpdateStatus.update_available) return;
+      if (!confirm('确认下载并应用最新版本？服务会短暂重启。')) return;
+      try {
+        if (button) {
+          button.disabled = true;
+          button.textContent = '更新中';
+        }
+        const data = await api('/api/update/apply', {method: 'POST', body: '{}'});
+        renderUpdateStatus(data.update || lastUpdateStatus);
+        log('更新已应用，服务即将重启；稍后刷新页面查看新版本。');
+      } catch (err) {
+        log('更新失败：' + err.message);
+        await loadUpdateStatus(true).catch(() => {});
+      } finally {
+        if (button) {
+          button.textContent = '更新';
+          button.disabled = false;
+        }
+      }
     }
 
     async function logout() {
@@ -1709,6 +1847,11 @@
 
     function updateManageRefreshClocks() {
       document.querySelectorAll('.manage-refresh-clock').forEach(node => {
+        if (node.classList.contains('stopped')) {
+          node.textContent = '新接口保活：已停止';
+          node.classList.remove('due');
+          return;
+        }
         const refreshAt = node.dataset.refreshAt || '';
         const text = manageRefreshText(refreshAt);
         node.textContent = `新接口保活：${text}`;
@@ -1724,6 +1867,10 @@
 
     function sessionManageRefreshBadge(session) {
       if (!appleAccountLoginSaved(session)) return '';
+      if (session.apple_account_login_checked && !session.apple_account_login_ok) {
+        const title = session.apple_account_login_status || '新接口登录态异常，请重新检测或重新登录后再保活';
+        return `<span class="manage-refresh-clock stopped" data-account-id="${esc(session.account_id || '')}" data-login-ok="0" data-refresh-at="" title="${esc(title)}">新接口保活：已停止</span>`;
+      }
       const refreshAt = session.apple_account_next_refresh_at || '';
       const expiresAt = session.apple_account_manage_expires_at || '';
       const loginOK = session.apple_account_login_checked && session.apple_account_login_ok ? '1' : '0';
@@ -2099,6 +2246,9 @@
 
     async function refresh() {
       const status = await api('/api/status');
+      if (!lastUpdateStatus && status.version) {
+        renderUpdateStatus({current: status.version, enabled: true});
+      }
       lastICloudSessions = status.icloud_sessions || (status.icloud_session && status.icloud_session.saved ? [status.icloud_session] : []);
       const sessionSaved = lastICloudSessions.length > 0;
       $('accountCount').textContent = Math.max(Number(status.accounts || 0), lastICloudSessions.length);
@@ -3022,6 +3172,7 @@
     ensureAuth()
       .then(() => loadCreateSettings().catch(err => log('读取创建配置失败：' + err.message)))
       .then(() => Promise.all([refresh(), refreshMailboxScheduler({silent: true})]))
+      .then(() => loadUpdateStatus().catch(err => log('检查更新失败：' + err.message)))
       .then(() => ensureSchedulerPolling())
       .catch(err => log('登录检查失败：' + err.message));
   </script>

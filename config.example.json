@@ -13,5 +13,9 @@
   "mail_watcher_initial_fetch_limit": 20,
   "mail_watcher_lookback_hours": 24,
   "public_fast_sync_wait_ms": 600,
-  "public_sync_min_interval_ms": 3000
+  "public_sync_min_interval_ms": 3000,
+  "update_enabled": true,
+  "update_repository": "q1953258942/iCloud-Privacy-Mail",
+  "update_manifest_url": "",
+  "update_asset_name": ""
 }
