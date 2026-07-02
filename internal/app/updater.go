@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -21,6 +22,8 @@ const (
 	updateHTTPTimeout      = 45 * time.Second
 	updateDownloadMaxBytes = 256 << 20
 )
+
+var updateGitHubAPIBaseURL = "https://api.github.com"
 
 type publicUpdateStatus struct {
 	Enabled         bool              `json:"enabled"`
@@ -62,6 +65,18 @@ type githubReleaseAsset struct {
 	Name               string `json:"name"`
 	BrowserDownloadURL string `json:"browser_download_url"`
 	Size               int64  `json:"size"`
+}
+
+type httpStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *httpStatusError) Error() string {
+	if strings.TrimSpace(e.Body) == "" {
+		return fmt.Sprintf("HTTP %d", e.StatusCode)
+	}
+	return fmt.Sprintf("HTTP %d：%s", e.StatusCode, strings.TrimSpace(e.Body))
 }
 
 func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
@@ -166,7 +181,7 @@ func (s *Server) fetchGitHubReleaseUpdateCandidate(ctx context.Context, status p
 	if repo == "" {
 		return updateCandidate{}, errors.New("检查更新失败：未配置 update_repository")
 	}
-	apiURL := "https://api.github.com/repos/" + repo + "/releases/latest"
+	apiURL := githubAPIURL("/repos/" + repo + "/releases/latest")
 	var release struct {
 		TagName     string               `json:"tag_name"`
 		Name        string               `json:"name"`
@@ -175,6 +190,10 @@ func (s *Server) fetchGitHubReleaseUpdateCandidate(ctx context.Context, status p
 		Assets      []githubReleaseAsset `json:"assets"`
 	}
 	if err := getJSON(ctx, apiURL, &release); err != nil {
+		var statusErr *httpStatusError
+		if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound {
+			return s.fetchGitHubDefaultBranchUpdateCandidate(ctx, repo, status)
+		}
 		return updateCandidate{}, fmt.Errorf("检查更新失败：%w", err)
 	}
 	asset, ok := selectGitHubReleaseAsset(release.Assets, runtime.GOOS, runtime.GOARCH, s.cfg.UpdateAssetName)
@@ -191,6 +210,58 @@ func (s *Server) fetchGitHubReleaseUpdateCandidate(ctx context.Context, status p
 		Status:      status,
 		DownloadURL: strings.TrimSpace(asset.BrowserDownloadURL),
 	}, nil
+}
+
+func (s *Server) fetchGitHubDefaultBranchUpdateCandidate(ctx context.Context, repo string, status publicUpdateStatus) (updateCandidate, error) {
+	var repoInfo struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	if err := getJSON(ctx, githubAPIURL("/repos/"+repo), &repoInfo); err != nil {
+		return updateCandidate{}, fmt.Errorf("检查更新失败：GitHub 仓库没有 Release，且读取默认分支失败：%w", err)
+	}
+	branch := strings.TrimSpace(repoInfo.DefaultBranch)
+	if branch == "" {
+		branch = "master"
+	}
+	var commitInfo struct {
+		SHA    string `json:"sha"`
+		Commit struct {
+			Message   string `json:"message"`
+			Committer struct {
+				Date string `json:"date"`
+			} `json:"committer"`
+		} `json:"commit"`
+	}
+	if err := getJSON(ctx, githubAPIURL("/repos/"+repo+"/commits/"+url.PathEscape(branch)), &commitInfo); err != nil {
+		return updateCandidate{}, fmt.Errorf("检查更新失败：GitHub 仓库没有 Release，且读取最新提交失败：%w", err)
+	}
+	latestSHA := strings.TrimSpace(commitInfo.SHA)
+	shortSHA := shortCommit(latestSHA)
+	currentCommit := strings.TrimSpace(status.Current.Commit)
+	matchesCurrent := currentCommit != "" && currentCommit != "unknown" && strings.HasPrefix(latestSHA, currentCommit)
+	status.LatestName = "GitHub 最新源码 " + shortSHA
+	status.LatestVersion = strings.TrimSpace(status.Current.Version)
+	if shortSHA != "" {
+		if status.LatestVersion == "" {
+			status.LatestVersion = shortSHA
+		} else {
+			status.LatestVersion += " / " + shortSHA
+		}
+	}
+	status.PublishedAt = strings.TrimSpace(commitInfo.Commit.Committer.Date)
+	status.AssetAvailable = false
+	status.UpdateAvailable = currentCommit != "" && currentCommit != "unknown" && !matchesCurrent
+	if matchesCurrent {
+		status.LatestNotes = "GitHub 仓库还没有发布 Release 更新包；已按默认分支最新提交确认，当前服务已经是最新源码。"
+	} else if currentCommit == "" || currentCommit == "unknown" {
+		status.LatestNotes = "GitHub 仓库还没有发布 Release 更新包；当前程序没有写入提交号，无法判断是否为最新源码。"
+	} else {
+		status.LatestNotes = "GitHub 仓库还没有发布 Release 更新包；默认分支已有新提交，但暂时没有可一键更新的二进制包。"
+	}
+	if msg := strings.TrimSpace(commitInfo.Commit.Message); msg != "" {
+		status.LatestNotes += "\n最新提交：" + firstLine(msg)
+	}
+	return updateCandidate{Status: status}, nil
 }
 
 func (s *Server) applyUpdate(ctx context.Context) (publicUpdateStatus, error) {
@@ -248,9 +319,39 @@ func getJSON(ctx context.Context, url string, out any) error {
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(res.Body, 2048))
-		return fmt.Errorf("HTTP %d：%s", res.StatusCode, strings.TrimSpace(string(body)))
+		return &httpStatusError{StatusCode: res.StatusCode, Body: strings.TrimSpace(string(body))}
 	}
 	return json.NewDecoder(io.LimitReader(res.Body, 4<<20)).Decode(out)
+}
+
+func githubAPIURL(path string) string {
+	base := strings.TrimRight(strings.TrimSpace(updateGitHubAPIBaseURL), "/")
+	if base == "" {
+		base = "https://api.github.com"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return base + path
+}
+
+func shortCommit(sha string) string {
+	sha = strings.TrimSpace(sha)
+	if len(sha) <= 7 {
+		return sha
+	}
+	return sha[:7]
+}
+
+func firstLine(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	if idx := strings.IndexAny(text, "\r\n"); idx >= 0 {
+		return strings.TrimSpace(text[:idx])
+	}
+	return text
 }
 
 func downloadAndReplaceExecutable(ctx context.Context, downloadURL, wantSHA256, exePath string) error {

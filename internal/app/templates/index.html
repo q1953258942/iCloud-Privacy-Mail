@@ -1547,6 +1547,7 @@
         `当前版本：${current}`,
         `最新版本：${latest}`
       ];
+      if (status.latest_name) lines.push(`最新来源：${status.latest_name}`);
       if (status.published_at) lines.push(`发布时间：${exactTimeText(status.published_at)}`);
       if (status.asset_name) lines.push(`更新包：${status.asset_name}`);
       if (status.error) lines.push(`检查失败：${status.error}`);

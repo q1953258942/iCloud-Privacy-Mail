@@ -103,7 +103,7 @@ Copy-Item .\config.example.json .\config.json
 
 面板顶部会显示当前版本；鼠标移到版本号上会显示最新版本号、发布时间和更新内容。管理员检测到新版本后可点击“更新”下载对应系统架构的二进制并替换当前程序，`data_path` 不会被覆盖。
 
-在线更新默认读取 GitHub 最新 Release，并自动匹配文件名中包含当前 `GOOS/GOARCH` 的资产。更稳妥的公开发布方式是配置 `update_manifest_url`，manifest 格式如下：
+在线更新默认读取 GitHub 最新 Release，并自动匹配文件名中包含当前 `GOOS/GOARCH` 的资产。如果仓库还没有发布 Release，面板会退回读取 GitHub 默认分支最新 commit：当前程序编译时写入的 commit 与默认分支一致时显示已是最新源码；默认分支已有新提交但没有 Release 资产时，只提示源码有更新，不显示一键更新按钮。更稳妥的公开发布方式是配置 `update_manifest_url`，manifest 格式如下：
 
 ```json
 {
