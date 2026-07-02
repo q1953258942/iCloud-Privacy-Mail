@@ -2,6 +2,7 @@
 build/
 bin/
 dist/
+编译临时/
 发布目录/
 *.exe
 *.dll
